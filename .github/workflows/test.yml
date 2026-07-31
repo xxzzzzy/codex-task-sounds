@@ -1,0 +1,14 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run isolated installer smoke test
+        shell: powershell
+        run: .\tests\smoke.ps1
