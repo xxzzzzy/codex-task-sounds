@@ -1,0 +1,8 @@
+src/config.json
+src/sounds/
+src/notify-state/
+src/notify.log
+*.backup-*
+*.tmp
+.DS_Store
+Thumbs.db
