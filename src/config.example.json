@@ -1,0 +1,17 @@
+{
+  "volume": 0.3,
+  "success": true,
+  "error": true,
+  "waiting": true,
+  "waiting_interval": 10,
+  "waiting_repeat": false,
+  "waiting_max_seconds": 120,
+  "detect_question_waiting": true,
+  "error_on_tool_failure": true,
+  "quiet_hours": {
+    "enabled": false,
+    "start": "23:00",
+    "end": "08:00"
+  },
+  "silent": false
+}
