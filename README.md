@@ -75,9 +75,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 ```text
 %USERPROFILE%\.codex\codex-task-sounds\sounds\success-custom.mp3
 %USERPROFILE%\.codex\codex-task-sounds\sounds\error-custom.mp3
+%USERPROFILE%\.codex\codex-task-sounds\sounds\action-custom.mp3
 ```
 
-脚本优先播放自定义 MP3；文件缺失或 Windows 无法解码时，会回退到本地生成的 WAV。`action.wav` 是默认的需要操作音。
+脚本优先播放自定义 MP3；文件缺失或 Windows 无法解码时，会回退到本地生成的 WAV。授权、确认等需要操作的事件使用更醒目的独立音量，默认播放 `action.wav`。
 
 ## 配置
 
@@ -86,6 +87,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 ```json
 {
   "volume": 0.3,
+  "waiting_volume": 0.65,
   "success": true,
   "error": true,
   "waiting": true,
@@ -103,7 +105,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 }
 ```
 
-- `volume`：自定义 MP3 音量，范围 0–1。
+- `volume`：完成与失败提示音量，范围 0–1。
+- `waiting_volume`：授权、确认等需要操作的提示音量，范围 0–1，默认高于完成音量以避免漏听。
 - `waiting_repeat`：默认关闭，避免等待音循环打扰。
 - `detect_question_waiting`：根据明确的确认、选择或回复请求识别等待状态。
 - `error_on_tool_failure`：工具返回明确失败时播放失败音；若觉得误报较多，可改为 `false`。

@@ -50,6 +50,8 @@ function Get-ManagedHookCount {
 
 try {
     [System.IO.Directory]::CreateDirectory($TestHome) | Out-Null
+    $legacyRootScript = Join-Path $TestHome "notify.ps1"
+    [System.IO.File]::WriteAllText($legacyRootScript, "# Codex task status sounds`r`nfunction Invoke-StatusSound {}`r`n", $Utf8NoBom)
     $existingHooks = [pscustomobject][ordered]@{
         hooks = [pscustomobject][ordered]@{
             Stop = @(
@@ -60,6 +62,12 @@ try {
                             command = "existing-tool --keep"
                             commandWindows = "existing-tool --keep"
                             timeout = 2
+                        },
+                        [pscustomobject][ordered]@{
+                            type = "command"
+                            command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $legacyRootScript + '" stop'
+                            commandWindows = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $legacyRootScript + '" stop'
+                            timeout = 5
                         },
                         [pscustomobject][ordered]@{
                             type = "command"
@@ -94,6 +102,7 @@ try {
 
     $exampleSettings = [System.IO.File]::ReadAllText((Join-Path $ProjectRoot "src\config.example.json"), $Utf8NoBom) | ConvertFrom-Json
     Assert-True ($exampleSettings -is [System.Management.Automation.PSCustomObject]) "the example configuration is valid JSON object"
+    Assert-True ([Math]::Abs([double]$exampleSettings.waiting_volume - 0.65) -lt 0.0001) "the example configuration includes the audible action-required volume"
 
     $installedScript = Join-Path $TestHome "codex-task-sounds\notify.ps1"
     $tokens = $null
@@ -102,6 +111,7 @@ try {
     Assert-True ($syntaxErrors.Count -eq 0) "installed script parses in PowerShell"
     $scriptText = [System.IO.File]::ReadAllText($installedScript)
     Assert-True (-not $scriptText.Contains("ToastNotification")) "custom Windows Toast code is absent"
+    Assert-True ($scriptText.Contains("action-custom.mp3")) "custom action-required sounds are supported"
 
     $hooks = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $TestHome "hooks.json") | ConvertFrom-Json
     foreach ($eventName in $EventModes.Keys) {
@@ -119,6 +129,8 @@ try {
     Assert-True ($decoyCount -eq 1) "a similarly named Hook owned by another installation was preserved"
     $samePathDecoyCount = @($hooks.hooks.Stop | ForEach-Object { $_.hooks } | Where-Object { $_.command -like "some-tool.exe*" }).Count
     Assert-True ($samePathDecoyCount -eq 1) "an unrelated Hook mentioning the installed script was preserved"
+    $legacyRootCount = @($hooks.hooks.Stop | ForEach-Object { $_.hooks } | Where-Object { $_.command -like "*$legacyRootScript*" }).Count
+    Assert-True ($legacyRootCount -eq 0) "an owned pre-1.0 root Hook was migrated"
 
     & (Join-Path $ProjectRoot "install.ps1") -CodexHome $TestHome -SkipStartup -NoStart
     $hooks = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $TestHome "hooks.json") | ConvertFrom-Json

@@ -10,10 +10,22 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) { throw "CodexHome cannot be empty
 $CodexHome = [System.IO.Path]::GetFullPath($CodexHome)
 $InstallRoot = Join-Path $CodexHome "codex-task-sounds"
 $InstallScript = Join-Path $InstallRoot "notify.ps1"
+$LegacyRootScript = Join-Path $CodexHome "notify.ps1"
 $HooksPath = Join-Path $CodexHome "hooks.json"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $StartupCommand = '"' + $PowerShellExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" watch'
+$LegacyRootOwned = $false
+if (Test-Path -LiteralPath $LegacyRootScript -PathType Leaf) {
+    try {
+        $legacyItem = Get-Item -LiteralPath $LegacyRootScript -Force
+        if (($legacyItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+            $legacyText = [System.IO.File]::ReadAllText($LegacyRootScript)
+            $LegacyRootOwned = $legacyText.Contains("Codex task status sounds") -and $legacyText.Contains("function Invoke-StatusSound")
+        }
+    }
+    catch { $LegacyRootOwned = $false }
+}
 
 function Get-PathKey {
     param([string]$Path)
@@ -51,19 +63,25 @@ function Get-HookCommand {
     return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded"
 }
 
-function Get-LegacyHookCommand {
+function Get-LegacyHookCommands {
     param([string]$Mode)
-    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" ' + $Mode
+    $commands = @('powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" ' + $Mode)
+    if ($LegacyRootOwned) {
+        $commands += 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $LegacyRootScript + '" ' + $Mode
+    }
+    return $commands
 }
 
 function Test-ManagedHook {
     param([object]$Hook, [string]$Mode)
     $expectedCommand = Get-HookCommand $Mode
-    $legacyCommand = Get-LegacyHookCommand $Mode
+    $legacyCommands = @(Get-LegacyHookCommands $Mode)
     foreach ($name in @("command", "commandWindows")) {
         $command = [string](Get-PropertyValue $Hook $name)
         if ($command.Equals($expectedCommand, [StringComparison]::Ordinal)) { return $true }
-        if ($command.Equals($legacyCommand, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        foreach ($legacyCommand in $legacyCommands) {
+            if ($command.Equals($legacyCommand, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
     }
     return $false
 }

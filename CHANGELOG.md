@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2 - 2026-08-01
+
+- Give permission and other action-required events an independent, more audible `waiting_volume` setting.
+- Support an optional `action-custom.mp3` while retaining the generated WAV fallback.
+- Make the documented `--version` command work in Windows PowerShell.
+- Migrate verified pre-1.0 root-level Hooks and avoid recreating an existing Windows `Run` registry key.
+- Read Hook payloads as raw UTF-8 so redirected permission requests are not corrupted by console encoding changes.
+
 ## 1.0.1 - 2026-08-01
 
 - Replace 250 ms recursive session scans with Windows file events and a five-second fallback check.

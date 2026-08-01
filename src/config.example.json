@@ -1,5 +1,6 @@
 {
   "volume": 0.3,
+  "waiting_volume": 0.65,
   "success": true,
   "error": true,
   "waiting": true,

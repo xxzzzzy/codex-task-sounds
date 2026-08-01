@@ -26,6 +26,17 @@ function Wait-Until {
     return $false
 }
 
+function Get-WavePeak {
+    param([string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $peak = 0
+    for ($index = 44; $index + 1 -lt $bytes.Length; $index += 2) {
+        $sample = [Math]::Abs([int][System.BitConverter]::ToInt16($bytes, $index))
+        if ($sample -gt $peak) { $peak = $sample }
+    }
+    return $peak
+}
+
 try {
     [System.IO.Directory]::CreateDirectory($TestHome) | Out-Null
     & (Join-Path $ProjectRoot "install.ps1") -CodexHome $TestHome -SkipStartup -NoStart
@@ -33,8 +44,14 @@ try {
     $settingsPath = Join-Path $TestHome "codex-task-sounds\config.json"
 
     . $installedScript help | Out-Null
-    Assert-True ($Version -eq "1.0.1") "runtime reports version 1.0.1"
+    Assert-True ($Version -eq "1.0.2") "runtime reports version 1.0.2"
+    $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
+    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.0.2") "the documented --version command succeeds"
     Assert-True (-not [bool](Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $true)) "fallback waiting_repeat is disabled"
+    Assert-True ([Math]::Abs((Get-WaitingVolume) - 0.65) -lt 0.0001) "action-required events use the documented independent volume"
+    $defaultSuccessPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\success.wav")
+    $defaultActionPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\action.wav")
+    Assert-True ($defaultActionPeak -gt ($defaultSuccessPeak * 1.8)) "the default action-required sound is substantially more audible than the completion fallback"
 
     $documentationPayload = [pscustomobject]@{
         output = @([pscustomobject]@{ type = "input_text"; text = "Documentation may contain the phrase Command failed inline without representing a failure." })
@@ -165,6 +182,7 @@ try {
 
     $settings = [System.IO.File]::ReadAllText($settingsPath, $Utf8NoBom) | ConvertFrom-Json
     $settings | Add-Member -NotePropertyName volume -NotePropertyValue 0 -Force
+    $settings | Add-Member -NotePropertyName waiting_volume -NotePropertyValue 0 -Force
     $settings | Add-Member -NotePropertyName silent -NotePropertyValue $false -Force
     Write-JsonAtomically $settingsPath $settings 20
     & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript generate
@@ -191,6 +209,33 @@ try {
     $expectedHookKey = "success|{0}|{1}" -f $hookSessionId, $hookTurnId
     $expectedStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash $expectedHookKey) + ".stamp")
     Assert-True (Wait-Until { Test-Path -LiteralPath $expectedStamp }) "quoted Hook identifiers survive child-process argument passing"
+
+    $runtimeHooks = [System.IO.File]::ReadAllText((Join-Path $TestHome "hooks.json"), $Utf8NoBom) | ConvertFrom-Json
+    $permissionCommand = [string]@($runtimeHooks.hooks.PermissionRequest | ForEach-Object { $_.hooks })[0].command
+    $permissionSessionId = '授权 session & % "quote"'
+    $permissionTurnId = '等待 turn & % "quote"'
+    $permissionPayload = [pscustomobject]@{ session_id = $permissionSessionId; turn_id = $permissionTurnId } | ConvertTo-Json -Compress
+    $permissionBytes = $Utf8NoBom.GetBytes($permissionPayload)
+    $permissionInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $permissionInfo.FileName = $env:ComSpec
+    $permissionInfo.Arguments = '/d /s /c "' + $permissionCommand + '"'
+    $permissionInfo.UseShellExecute = $false
+    $permissionInfo.CreateNoWindow = $true
+    $permissionInfo.RedirectStandardInput = $true
+    $permissionProcess = New-Object System.Diagnostics.Process
+    $permissionProcess.StartInfo = $permissionInfo
+    $permissionStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    [void]$permissionProcess.Start()
+    $permissionProcess.StandardInput.BaseStream.Write($permissionBytes, 0, $permissionBytes.Length)
+    $permissionProcess.StandardInput.BaseStream.Close()
+    Assert-True ($permissionProcess.WaitForExit(5000)) "PermissionRequest Hook returns"
+    $permissionStopwatch.Stop()
+    Assert-True ($permissionProcess.ExitCode -eq 0 -and $permissionStopwatch.ElapsedMilliseconds -lt 2000) "PermissionRequest Hook dispatches sound asynchronously"
+    $permissionKey = "action|{0}|{1}|start" -f $permissionSessionId, $permissionTurnId
+    $permissionStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash $permissionKey) + ".stamp")
+    Assert-True (Wait-Until { Test-Path -LiteralPath $permissionStamp }) "UTF-8 Hook input reaches the action-required sound path"
+    Assert-True (Test-WaitingForTurn $permissionSessionId $permissionTurnId) "UTF-8 Hook input preserves the waiting session and turn identifiers"
+    Clear-Waiting $permissionSessionId $permissionTurnId
 
     $stampCountBefore = @(Get-ChildItem -LiteralPath $StateDirectory -Filter "event-*.stamp" -File).Count
     $emptyHookInfo = New-Object System.Diagnostics.ProcessStartInfo

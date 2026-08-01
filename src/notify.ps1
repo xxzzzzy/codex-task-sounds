@@ -9,6 +9,8 @@ param(
     [string]$DedupeKey,
     [string]$ReadyToken,
     [int]$ParentProcessId = 0,
+    [Alias("version")]
+    [switch]$ShowVersion,
     [switch]$Silent,
     [switch]$Unsilent
 )
@@ -25,12 +27,10 @@ $SessionsDirectory = Join-Path $CodexHome "sessions"
 $LogPath = Join-Path $InstallRoot "notify.log"
 $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$Version = "1.0.1"
+$Version = "1.0.2"
 $MaxLogBytes = 2MB
 $MaxLogArchives = 3
 $SettingsWarningLogged = $false
-try { [Console]::InputEncoding = $Utf8NoBom }
-catch { [System.Diagnostics.Debug]::WriteLine($_.Exception.Message) }
 
 function Get-TextHash {
     param([string]$Text)
@@ -90,6 +90,7 @@ function Write-NotifyLog {
 function Get-DefaultConfiguration {
     [pscustomobject][ordered]@{
         volume = 0.3
+        waiting_volume = 0.65
         success = $true
         error = $true
         waiting = $true
@@ -200,6 +201,13 @@ function Get-NotifyVolume {
     $volume = 0.3
     try { $volume = [double](Get-Setting (Read-Configuration) "volume" 0.3) }
     catch { Write-NotifyLog ("invalid volume; using default error={0}" -f $_.Exception.Message) }
+    return [Math]::Max(0.0, [Math]::Min(1.0, $volume))
+}
+
+function Get-WaitingVolume {
+    $volume = 0.65
+    try { $volume = [double](Get-Setting (Read-Configuration) "waiting_volume" 0.65) }
+    catch { Write-NotifyLog ("invalid waiting volume; using default error={0}" -f $_.Exception.Message) }
     return [Math]::Max(0.0, [Math]::Min(1.0, $volume))
 }
 
@@ -344,7 +352,10 @@ function Initialize-Sound {
     param([switch]$Force)
     Initialize-Directory
     $volume = Get-NotifyVolume
-    $volumeText = $volume.ToString("0.0000", [Globalization.CultureInfo]::InvariantCulture)
+    $waitingVolume = Get-WaitingVolume
+    $volumeText = "{0}|{1}" -f
+        $volume.ToString("0.0000", [Globalization.CultureInfo]::InvariantCulture),
+        $waitingVolume.ToString("0.0000", [Globalization.CultureInfo]::InvariantCulture)
     $volumeMarker = Join-Path $SoundsDirectory ".generated-volume"
     $successPath = Join-Path $SoundsDirectory "success.wav"
     $errorPath = Join-Path $SoundsDirectory "error.wav"
@@ -380,10 +391,10 @@ function Initialize-Sound {
                 [pscustomobject]@{ Frequency = 261.63; Duration = 0.150; Gap = 0.000 }
             ) ($volume * 0.68)
             Write-WaveSequence $temporaryAction @(
-                [pscustomobject]@{ Frequency = 523.25; Duration = 0.120; Gap = 0.080 },
-                [pscustomobject]@{ Frequency = 659.25; Duration = 0.120; Gap = 0.080 },
-                [pscustomobject]@{ Frequency = 523.25; Duration = 0.120; Gap = 0.000 }
-            ) ($volume * 0.72)
+                [pscustomobject]@{ Frequency = 659.25; Duration = 0.160; Gap = 0.070 },
+                [pscustomobject]@{ Frequency = 880.00; Duration = 0.160; Gap = 0.070 },
+                [pscustomobject]@{ Frequency = 659.25; Duration = 0.200; Gap = 0.000 }
+            ) ($waitingVolume * 0.82)
             [System.IO.File]::WriteAllText($temporaryMarker, $volumeText, $Utf8NoBom)
             Remove-Item -LiteralPath $volumeMarker -Force -ErrorAction SilentlyContinue
             Move-FileAtomically $temporarySuccess $successPath
@@ -450,7 +461,7 @@ function Invoke-StatusSound {
     $customPath = switch ($Status) {
         "success" { Join-Path $SoundsDirectory "success-custom.mp3" }
         "error" { Join-Path $SoundsDirectory "error-custom.mp3" }
-        default { $null }
+        "action" { Join-Path $SoundsDirectory "action-custom.mp3" }
     }
     $path = if (-not [string]::IsNullOrWhiteSpace($customPath) -and (Test-Path -LiteralPath $customPath)) {
         $customPath
@@ -459,19 +470,29 @@ function Invoke-StatusSound {
         $fallbackPath
     }
     try {
-        Invoke-AudioFile $path (Get-NotifyVolume)
+        $playbackVolume = if ($Status -eq "action") { Get-WaitingVolume } else { Get-NotifyVolume }
+        Invoke-AudioFile $path $playbackVolume
         Write-NotifyLog ("sound played status={0} path={1} key={2}" -f $Status, $path, $DedupeKey)
     }
     catch {
         if ($path -eq $fallbackPath) { throw }
         Write-NotifyLog ("sound fallback status={0} custom={1} error={2}" -f $Status, $path, $_.Exception.Message)
-        Invoke-AudioFile $fallbackPath (Get-NotifyVolume)
+        Invoke-AudioFile $fallbackPath $playbackVolume
         Write-NotifyLog ("sound played status={0} path={1} key={2}" -f $Status, $fallbackPath, $DedupeKey)
     }
 }
 
 function Read-HookInput {
-    $raw = [Console]::In.ReadToEnd()
+    $inputStream = [Console]::OpenStandardInput()
+    $memory = New-Object System.IO.MemoryStream
+    try {
+        $inputStream.CopyTo($memory)
+        $raw = $Utf8NoBom.GetString($memory.ToArray()).TrimStart([char]0xFEFF)
+    }
+    finally {
+        $memory.Dispose()
+        $inputStream.Dispose()
+    }
     if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
     try { return $raw | ConvertFrom-Json }
     catch { return $null }
@@ -1056,6 +1077,10 @@ Codex task status sounds
 }
 
 try {
+    if ($ShowVersion) {
+        Write-Output $Version
+        exit 0
+    }
     Initialize-Directory
     Write-NotifyLog ("invoke mode={0}" -f $Mode)
     if ($Silent -or $Mode -eq "--silent" -or $Mode -eq "silent") {
