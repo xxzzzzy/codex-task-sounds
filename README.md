@@ -1,5 +1,8 @@
 # Codex Task Sounds for Windows
 
+[![test](https://github.com/xxzzzzy/codex-task-sounds/actions/workflows/test.yml/badge.svg)](https://github.com/xxzzzzy/codex-task-sounds/actions/workflows/test.yml)
+[![license](https://img.shields.io/github/license/xxzzzzy/codex-task-sounds)](LICENSE)
+
 为 Codex CLI 和 Codex 桌面端补充任务状态提示音。Codex 原生的 Windows 右下角通知保持不变；本项目不创建额外 Toast，因此不会重复弹窗。
 
 ## 功能
@@ -35,10 +38,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 安装器会：
 
 1. 将运行文件复制到 `%USERPROFILE%\.codex\codex-task-sounds`。
-2. 备份并合并 `%USERPROFILE%\.codex\hooks.json`，不会覆盖其他 Hook。
-3. 生成默认 WAV 提示音。
+2. 严格校验后原子备份并合并 `%USERPROFILE%\.codex\hooks.json`，不会覆盖其他 Hook。
+3. 在隔离目录生成并验证默认 WAV，再原子部署运行文件。
 4. 在当前用户的 `HKCU\...\Run` 中注册登录自启，不需要管理员权限。
-5. 立即启动后台监听器。
+5. 立即启动并验证后台监听器；声音生成或监听器启动失败时安装会明确报错。
+
+Hook 使用隐藏、非交互的编码 PowerShell 命令，安装路径即使含有中文、空格、`&`、`%` 或单引号也不会被命令行误解析。正常运行不会弹出 PowerShell 窗口。
 
 如果使用了自定义 `CODEX_HOME`，安装器会自动读取；也可以显式指定：
 
@@ -56,6 +61,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 ```
 
 这三条命令只播放声音，不创建 Windows 通知。
+
+查看已安装版本：
+
+```powershell
+& $script --version
+```
 
 ## 自定义声音
 
@@ -108,9 +119,9 @@ $script = "$env:USERPROFILE\.codex\codex-task-sounds\notify.ps1"
 
 ## 工作原理
 
-安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。由于单个 Hook 不能稳定表达全部失败状态，后台监听器还会只读扫描 `%CODEX_HOME%\sessions` 中新增的 rollout 记录，并按 session/turn 去重。
+安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。Hook 会快速返回，声音由隐藏子进程异步播放，不会因较长的自定义 MP3 阻塞 Codex。由于单个 Hook 不能稳定表达全部失败状态，后台监听器还会通过 Windows 文件事件只读处理 `%CODEX_HOME%\sessions` 中新增的 rollout 记录，并每 5 秒进行一次低频兜底检查。相同 rollout 事件会跨监听器去重，不再高频递归扫描全部会话文件。
 
-监听器不修改 Codex 会话文件，不联网，也不发送遥测。诊断日志保存在本机安装目录的 `notify.log`，可能包含本地路径和 Codex 的会话/turn 标识；提交 Issue 前请先脱敏。
+监听器不修改 Codex 会话文件，不联网，也不发送遥测。诊断日志保存在本机安装目录的 `notify.log`，单个日志达到 2 MB 后自动轮转，最多保留三份归档。日志可能包含本地路径和 Codex 的会话/turn 标识；提交 Issue 前请先脱敏。
 
 ## 诊断
 
@@ -130,6 +141,15 @@ Get-Content "$env:USERPROFILE\.codex\codex-task-sounds\notify.log" -Tail 50
 
 重新安装是幂等的：安装器会移除本项目的旧 Hook 后再写入一份，不会重复叠加。
 
+## 升级
+
+```powershell
+git pull --ff-only
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+升级会保留并校验现有 `config.json`，并为每次实际发生的 `hooks.json` 替换创建唯一备份。若配置或 Hook 结构损坏，安装器会停止且保留原文件，便于手动修复。
+
 ## 卸载
 
 在仓库目录运行：
@@ -138,7 +158,7 @@ Get-Content "$env:USERPROFILE\.codex\codex-task-sounds\notify.log" -Tail 50
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
-卸载器会停止监听器、移除登录自启、只删除本项目的 Hook，并删除 `%USERPROFILE%\.codex\codex-task-sounds`。修改 `hooks.json` 前会创建时间戳备份。
+卸载器会先完成结构和路径安全校验，再停止监听器、移除登录自启、只删除本项目的 Hook，并删除 `%USERPROFILE%\.codex\codex-task-sounds`。修改 `hooks.json` 前会创建时间戳备份；重复卸载不会改写已经干净的 Hook 文件。若安装目录或其子项是重解析点，卸载器会拒绝递归删除。
 
 如果只想移除 Hook 和自启但保留声音、配置及日志：
 
@@ -148,13 +168,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 
 ## 开发与验证
 
-隔离烟雾测试不会修改真实 `%USERPROFILE%\.codex`：
+两组隔离测试都不会修改真实 `%USERPROFILE%\.codex`：
 
 ```powershell
 .\tests\smoke.ps1
+.\tests\runtime.ps1
 ```
 
-GitHub Actions 会在 `windows-latest` 上执行同一测试，覆盖安装、重复安装、Hook 保留、Toast 代码缺失和卸载。
+GitHub Actions 会在 `windows-latest` 上执行同一测试，覆盖安装、重复安装、原子备份、精确 Hook 所有权、特殊字符路径、隐藏异步 Hook、Toast 代码缺失、安全卸载、UTF-8 增量读取、错误识别、等待状态隔离、日志轮转、失败退出码、监听器互斥与文件事件监听。
 
 ## 隐私与安全
 

@@ -4,11 +4,22 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-smoke:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Run isolated installer smoke test
         shell: powershell
         run: .\tests\smoke.ps1
+      - name: Run isolated runtime behavior test
+        shell: powershell
+        run: .\tests\runtime.ps1

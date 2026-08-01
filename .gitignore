@@ -2,7 +2,11 @@ src/config.json
 src/sounds/
 src/notify-state/
 src/notify.log
+src/notify.log.*
 *.backup-*
 *.tmp
+.hooks.json.tmp-*
+.*.tmp-*
+.*.replace-backup-*
 .DS_Store
 Thumbs.db
