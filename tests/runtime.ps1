@@ -48,6 +48,7 @@ try {
     $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
     Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.0.2") "the documented --version command succeeds"
     Assert-True (-not [bool](Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $true)) "fallback waiting_repeat is disabled"
+    Assert-True (-not [bool](Get-Setting (Get-DefaultConfiguration) "error_on_tool_failure" $true)) "fallback tool-step failure sounds are disabled"
     Assert-True ([Math]::Abs((Get-WaitingVolume) - 0.65) -lt 0.0001) "action-required events use the documented independent volume"
     $defaultSuccessPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\success.wav")
     $defaultActionPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\action.wav")
@@ -60,8 +61,14 @@ try {
     $failedPayload = [pscustomobject]@{
         output = @([pscustomobject]@{ type = "input_text"; text = "Script failed`nExit code: 7" })
     }
+    Assert-True (-not (Test-ToolOutputFailed $failedPayload)) "recoverable tool-step failures are quiet by default"
+    $toolFailureSettings = [System.IO.File]::ReadAllText($settingsPath, $Utf8NoBom) | ConvertFrom-Json
+    $toolFailureSettings | Add-Member -NotePropertyName error_on_tool_failure -NotePropertyValue $true -Force
+    Write-JsonAtomically $settingsPath $toolFailureSettings 20
     Assert-True (Test-ToolOutputFailed $failedPayload) "rendered nonzero tool failure is detected"
     Assert-True (Test-ToolOutputFailed ([pscustomobject]@{ isError = $true })) "structured tool failure is detected"
+    $toolFailureSettings.error_on_tool_failure = $false
+    Write-JsonAtomically $settingsPath $toolFailureSettings 20
     Assert-True (Test-MessageNeedsInput "请确认是否继续？") "Chinese confirmation questions are recognized as waiting for input"
     Assert-True (Test-MessageNeedsInput "Could you choose one?") "English questions are recognized as waiting for input"
     Assert-True (-not (Test-MessageNeedsInput "The task is complete.")) "declarative completion text is not treated as waiting for input"

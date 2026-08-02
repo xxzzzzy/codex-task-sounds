@@ -8,7 +8,7 @@
   "waiting_repeat": false,
   "waiting_max_seconds": 120,
   "detect_question_waiting": true,
-  "error_on_tool_failure": true,
+  "error_on_tool_failure": false,
   "quiet_hours": {
     "enabled": false,
     "start": "23:00",

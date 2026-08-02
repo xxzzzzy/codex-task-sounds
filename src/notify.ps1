@@ -98,7 +98,7 @@ function Get-DefaultConfiguration {
         waiting_repeat = $false
         waiting_max_seconds = 120
         detect_question_waiting = $true
-        error_on_tool_failure = $true
+        error_on_tool_failure = $false
         silent = $false
         quiet_hours = [pscustomobject][ordered]@{
             enabled = $false
@@ -713,7 +713,7 @@ function Get-ToolDiagnosticText {
 
 function Test-ToolOutputFailed {
     param([object]$Payload)
-    if (-not (Get-BooleanSetting (Read-Configuration) "error_on_tool_failure" $true)) { return $false }
+    if (-not (Get-BooleanSetting (Read-Configuration) "error_on_tool_failure" $false)) { return $false }
     foreach ($node in @($Payload, (Get-Setting $Payload "result" $null))) {
         if ($null -eq $node) { continue }
         if ((Get-BooleanSetting $node "isError" $false) -or (Get-BooleanSetting $node "is_error" $false)) { return $true }

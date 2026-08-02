@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Disable immediate sounds for recoverable tool-step failures by default while retaining final task failure sounds and the opt-in setting.
+
 ## 1.0.2 - 2026-08-01
 
 - Give permission and other action-required events an independent, more audible `waiting_volume` setting.

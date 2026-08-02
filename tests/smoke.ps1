@@ -103,6 +103,7 @@ try {
     $exampleSettings = [System.IO.File]::ReadAllText((Join-Path $ProjectRoot "src\config.example.json"), $Utf8NoBom) | ConvertFrom-Json
     Assert-True ($exampleSettings -is [System.Management.Automation.PSCustomObject]) "the example configuration is valid JSON object"
     Assert-True ([Math]::Abs([double]$exampleSettings.waiting_volume - 0.65) -lt 0.0001) "the example configuration includes the audible action-required volume"
+    Assert-True (-not [bool]$exampleSettings.error_on_tool_failure) "recoverable tool-step failure sounds are disabled by default"
 
     $installedScript = Join-Path $TestHome "codex-task-sounds\notify.ps1"
     $tokens = $null

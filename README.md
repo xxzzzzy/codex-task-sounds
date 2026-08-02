@@ -95,7 +95,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
   "waiting_repeat": false,
   "waiting_max_seconds": 120,
   "detect_question_waiting": true,
-  "error_on_tool_failure": true,
+  "error_on_tool_failure": false,
   "quiet_hours": {
     "enabled": false,
     "start": "23:00",
@@ -109,7 +109,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 - `waiting_volume`：授权、确认等需要操作的提示音量，范围 0–1，默认高于完成音量以避免漏听。
 - `waiting_repeat`：默认关闭，避免等待音循环打扰。
 - `detect_question_waiting`：根据明确的确认、选择或回复请求识别等待状态。
-- `error_on_tool_failure`：工具返回明确失败时播放失败音；若觉得误报较多，可改为 `false`。
+- `error_on_tool_failure`：默认关闭，避免 Codex 自动恢复中间工具失败时频繁播放失败音；设为 `true` 可立即播报每次明确的工具失败。
 - `quiet_hours`：可配置夜间静音时段。
 
 临时静音或恢复：
