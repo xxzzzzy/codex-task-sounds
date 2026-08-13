@@ -96,6 +96,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
   "waiting_max_seconds": 120,
   "detect_question_waiting": true,
   "error_on_tool_failure": false,
+  "verify_task_completion": true,
+  "completion_grace_ms": 750,
   "quiet_hours": {
     "enabled": false,
     "start": "23:00",
@@ -110,6 +112,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 - `waiting_repeat`：默认关闭，避免等待音循环打扰。
 - `detect_question_waiting`：根据明确的确认、选择或回复请求识别等待状态。
 - `error_on_tool_failure`：默认关闭，避免 Codex 自动恢复中间工具失败时频繁播放失败音；设为 `true` 可立即播报每次明确的工具失败。
+- `verify_task_completion`：默认开启。`Stop` Hook 必须在对应 rollout 中找到同一 turn 的最终完成/失败事件才会播放，避免中间停止信号被误报为任务完成。
+- `completion_grace_ms`：等待最终 rollout 事件写入的宽限时间，默认 `750` 毫秒，可设为 `0` 至 `3000`。
 - `quiet_hours`：可配置夜间静音时段。
 
 临时静音或恢复：
@@ -122,7 +126,7 @@ $script = "$env:USERPROFILE\.codex\codex-task-sounds\notify.ps1"
 
 ## 工作原理
 
-安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。Hook 会快速返回，声音由隐藏子进程异步播放，不会因较长的自定义 MP3 阻塞 Codex。由于单个 Hook 不能稳定表达全部失败状态，后台监听器还会通过 Windows 文件事件只读处理 `%CODEX_HOME%\sessions` 中新增的 rollout 记录，并每 5 秒进行一次低频兜底检查。相同 rollout 事件会跨监听器去重，不再高频递归扫描全部会话文件。
+安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。Hook 会快速返回，声音由隐藏子进程异步播放，不会因较长的自定义 MP3 阻塞 Codex。`Stop` 只作为完成候选，运行时会只读核对对应 rollout 中同一 turn 的最终状态；没有最终事件的中间 Stop 保持静默，明确标记的 subagent 会话也不会产生全局完成音。由于单个 Hook 不能稳定表达全部失败状态，后台监听器还会通过 Windows 文件事件只读处理 `%CODEX_HOME%\sessions` 中新增的 rollout 记录，并每 5 秒进行一次低频兜底检查。相同 rollout 事件会跨监听器去重，不再高频递归扫描全部会话文件。
 
 监听器不修改 Codex 会话文件，不联网，也不发送遥测。诊断日志保存在本机安装目录的 `notify.log`，单个日志达到 2 MB 后自动轮转，最多保留三份归档。日志可能包含本地路径和 Codex 的会话/turn 标识；提交 Issue 前请先脱敏。
 

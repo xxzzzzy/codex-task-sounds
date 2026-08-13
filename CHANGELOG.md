@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+## 1.0.3 - 2026-08-12
+
 - Disable immediate sounds for recoverable tool-step failures by default while retaining final task failure sounds and the opt-in setting.
+- Verify that a `Stop` Hook has a matching terminal rollout event before playing completion feedback, preventing intermediate Stop events from sounding like finished tasks.
+- Suppress global completion feedback from explicitly marked subagent sessions.
 
 ## 1.0.2 - 2026-08-01
 

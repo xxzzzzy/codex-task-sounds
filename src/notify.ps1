@@ -27,7 +27,7 @@ $SessionsDirectory = Join-Path $CodexHome "sessions"
 $LogPath = Join-Path $InstallRoot "notify.log"
 $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$Version = "1.0.2"
+$Version = "1.0.3"
 $MaxLogBytes = 2MB
 $MaxLogArchives = 3
 $SettingsWarningLogged = $false
@@ -99,6 +99,8 @@ function Get-DefaultConfiguration {
         waiting_max_seconds = 120
         detect_question_waiting = $true
         error_on_tool_failure = $false
+        verify_task_completion = $true
+        completion_grace_ms = 750
         silent = $false
         quiet_hours = [pscustomobject][ordered]@{
             enabled = $false
@@ -676,6 +678,177 @@ function Resolve-Transcript {
     return $null
 }
 
+function Test-PathInsideDirectory {
+    param([string]$Path, [string]$Directory)
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Directory)) { return $false }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $fullDirectory = [System.IO.Path]::GetFullPath($Directory).TrimEnd('\') + '\'
+        return $fullPath.StartsWith($fullDirectory, [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch { return $false }
+}
+
+function Resolve-CompletionTranscript {
+    param([string]$Id, [string]$Candidate)
+    if (-not [string]::IsNullOrWhiteSpace($Candidate) -and
+        (Test-PathInsideDirectory $Candidate $SessionsDirectory) -and
+        [System.IO.Path]::GetExtension($Candidate).Equals(".jsonl", [StringComparison]::OrdinalIgnoreCase) -and
+        (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+        return (Get-Item -LiteralPath $Candidate).FullName
+    }
+    if ([string]::IsNullOrWhiteSpace($Id) -or -not (Test-Path -LiteralPath $SessionsDirectory)) { return $null }
+    try {
+        $matches = @([System.IO.Directory]::EnumerateFiles($SessionsDirectory, ("*" + $Id + "*.jsonl"), [System.IO.SearchOption]::AllDirectories))
+        if ($matches.Count -eq 0) { return $null }
+        return @($matches | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object LastWriteTime -Descending)[0].FullName
+    }
+    catch { return $null }
+}
+
+function Read-SharedTextLines {
+    param([string]$Path, [scriptblock]$Visitor)
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $reader = New-Object System.IO.StreamReader($stream, $Utf8NoBom, $true, 4096, $true)
+        try {
+            while (-not $reader.EndOfStream) {
+                if (& $Visitor $reader.ReadLine()) { return $true }
+            }
+        }
+        finally { $reader.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    return $false
+}
+
+function Test-NotifiableTranscript {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
+    $notifiable = $true
+    Remove-Variable -Name TranscriptIsNotifiable -Scope Script -ErrorAction SilentlyContinue
+    try {
+        [void](Read-SharedTextLines $Path {
+            param([string]$Line)
+            if ([string]::IsNullOrWhiteSpace($Line)) { return $false }
+            try { $item = $Line | ConvertFrom-Json }
+            catch { return $false }
+            if ([string](Get-Setting $item "type" "") -ne "session_meta") { return $false }
+            $metadata = Get-Setting $item "payload" $null
+            $source = Get-Setting $metadata "source" $null
+            $threadSource = [string](Get-Setting $metadata "thread_source" "")
+            if ($threadSource -match '^(?i)subagent$') { $script:TranscriptIsNotifiable = $false }
+            elseif ($source -is [string] -and $source -match '^(?i)subagent$') { $script:TranscriptIsNotifiable = $false }
+            elseif ($null -ne $source -and $source -isnot [string] -and $null -ne $source.PSObject.Properties["subagent"]) {
+                $script:TranscriptIsNotifiable = $false
+            }
+            return $true
+        })
+        if ($null -ne (Get-Variable -Name TranscriptIsNotifiable -Scope Script -ErrorAction SilentlyContinue)) {
+            $notifiable = [bool]$script:TranscriptIsNotifiable
+            Remove-Variable -Name TranscriptIsNotifiable -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        Write-NotifyLog ("transcript metadata read failed path={0} error={1}" -f $Path, $_.Exception.Message)
+    }
+    return $notifiable
+}
+
+function Get-TaskCompletionEvidence {
+    param([string]$Id, [string]$Turn, [string]$CandidateTranscript)
+    $path = Resolve-CompletionTranscript $Id $CandidateTranscript
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return [pscustomobject]@{ Found = $false; Status = ""; Message = ""; Path = ""; Reason = "transcript-not-found" }
+    }
+    if (-not (Test-NotifiableTranscript $path)) {
+        return [pscustomobject]@{ Found = $false; Status = ""; Message = ""; Path = $path; Reason = "non-top-level-session" }
+    }
+    if ([string]::IsNullOrWhiteSpace($Turn) -or $Turn -eq "unknown") {
+        return [pscustomobject]@{ Found = $false; Status = ""; Message = ""; Path = $path; Reason = "turn-id-missing" }
+    }
+    $result = [pscustomobject]@{ Found = $false; Status = ""; Message = ""; Path = $path; Reason = "terminal-event-not-found" }
+    Remove-Variable -Name TaskCompletionResult -Scope Script -ErrorAction SilentlyContinue
+    try {
+        [void](Read-SharedTextLines $path {
+            param([string]$Line)
+            if ([string]::IsNullOrWhiteSpace($Line)) { return $false }
+            try { $item = $Line | ConvertFrom-Json }
+            catch { return $false }
+            if ([string]$item.method -eq "turn/completed") {
+                $completedTurn = Get-Setting $item.params "turn" $null
+                if ([string](Get-Setting $completedTurn "id" "") -ne $Turn) { return $false }
+                $status = [string](Get-Setting $completedTurn "status" "completed")
+                $script:TaskCompletionResult = [pscustomobject]@{
+                    Found = $true
+                    Status = $(if ($status -match '(?i)failed|interrupted|cancelled|canceled|aborted') { "error" } else { "success" })
+                    Message = ""
+                    Path = $path
+                    Reason = "turn-completed"
+                }
+                return $true
+            }
+            if ([string](Get-Setting $item "type" "") -ne "event_msg") { return $false }
+            $payload = Get-Setting $item "payload" $null
+            if ([string](Get-Setting $payload "turn_id" "") -ne $Turn) { return $false }
+            $payloadType = [string](Get-Setting $payload "type" "")
+            if ($payloadType -eq "task_complete") {
+                $script:TaskCompletionResult = [pscustomobject]@{
+                    Found = $true
+                    Status = "success"
+                    Message = [string](Get-Setting $payload "last_agent_message" "")
+                    Path = $path
+                    Reason = "task-complete"
+                }
+                return $true
+            }
+            if ($payloadType -match '^(error|stream_error|turn_aborted|task_failed|turn_failed)$') {
+                $script:TaskCompletionResult = [pscustomobject]@{
+                    Found = $true
+                    Status = "error"
+                    Message = [string](Get-Setting $payload "message" "")
+                    Path = $path
+                    Reason = $payloadType
+                }
+                return $true
+            }
+            return $false
+        })
+        if ($null -ne (Get-Variable -Name TaskCompletionResult -Scope Script -ErrorAction SilentlyContinue)) {
+            $result = $script:TaskCompletionResult
+            Remove-Variable -Name TaskCompletionResult -Scope Script -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        $result.Reason = "transcript-read-failed"
+        Write-NotifyLog ("completion evidence read failed path={0} turn={1} error={2}" -f $path, $Turn, $_.Exception.Message)
+    }
+    return $result
+}
+
+function Wait-TaskCompletionEvidence {
+    param([string]$Id, [string]$Turn, [string]$CandidateTranscript)
+    $settings = Read-Configuration
+    if (-not (Get-BooleanSetting $settings "verify_task_completion" $true)) {
+        return [pscustomobject]@{ Found = $true; Status = "success"; Message = ""; Path = $CandidateTranscript; Reason = "verification-disabled" }
+    }
+    $graceMilliseconds = Get-IntegerSetting $settings "completion_grace_ms" 750 0 3000
+    $deadline = (Get-Date).AddMilliseconds($graceMilliseconds)
+    do {
+        $evidence = Get-TaskCompletionEvidence $Id $Turn $CandidateTranscript
+        if ($evidence.Found -or $evidence.Reason -eq "non-top-level-session") { return $evidence }
+        if ((Get-Date) -ge $deadline) { return $evidence }
+        Start-Sleep -Milliseconds 100
+    } while ($true)
+}
+
+function Test-SessionFeedbackAllowed {
+    param([string]$Id)
+    $path = Resolve-CompletionTranscript $Id $null
+    if ([string]::IsNullOrWhiteSpace($path)) { return $true }
+    return Test-NotifiableTranscript $path
+}
+
 function Get-ToolDiagnosticText {
     param([object]$Payload)
     $fragments = New-Object System.Collections.Generic.List[string]
@@ -751,7 +924,10 @@ function Invoke-RolloutLine {
         $status = [string](Get-Setting $turn "status" "completed")
         Clear-Waiting $Id
         if ($status -match '(?i)failed|interrupted|cancelled|canceled|aborted') {
-            Invoke-HiddenStatusSound "error" ("error|{0}|{1}|{2}" -f $Id, $completedTurnId, $status)
+            if (Test-SessionFeedbackAllowed $Id) {
+                Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $Id, $completedTurnId)
+            }
+            else { Write-NotifyLog ("feedback skipped session={0} reason=non-top-level-session" -f $Id) }
         }
         return
     }
@@ -763,7 +939,10 @@ function Invoke-RolloutLine {
         if ($payloadType -match '^(error|stream_error|turn_aborted|task_failed|turn_failed)$') {
             if (-not (Test-AndMarkEvent $claimKey 300)) { return }
             Clear-Waiting $Id
-            Invoke-HiddenStatusSound "error" ("error|{0}|{1}|{2}" -f $Id, $activeTurnId, $payloadType)
+            if (Test-SessionFeedbackAllowed $Id) {
+                Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $Id, $activeTurnId)
+            }
+            else { Write-NotifyLog ("feedback skipped session={0} reason=non-top-level-session" -f $Id) }
             return
         }
         if ($payloadType -match '^(exec_approval_request|apply_patch_approval_request|request_user_input|elicitation_request|mcp_elicitation_request)$') {
@@ -778,6 +957,9 @@ function Invoke-RolloutLine {
             Clear-Waiting $Id
             if (Test-MessageNeedsInput $message) {
                 Invoke-Waiting $Id $completedTurnId "assistant-question" -AsynchronousSound
+            }
+            elseif (-not (Test-SessionFeedbackAllowed $Id)) {
+                Write-NotifyLog ("feedback skipped session={0} reason=non-top-level-session" -f $Id)
             }
             else {
                 Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $Id, $completedTurnId)
@@ -1111,9 +1293,27 @@ try {
                 $id = [string](Get-Setting $payload "session_id" "global")
                 $turn = [string](Get-Setting $payload "turn_id" "unknown")
                 $message = [string](Get-Setting $payload "last_assistant_message" "")
+                $transcript = [string](Get-Setting $payload "transcript_path" "")
                 Clear-Waiting $id
-                if (Test-MessageNeedsInput $message) { Invoke-Waiting $id $turn "assistant-question" -AsynchronousSound }
-                else { Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $id, $turn) }
+                if (Test-MessageNeedsInput $message) {
+                    Invoke-Waiting $id $turn "assistant-question" -AsynchronousSound
+                }
+                else {
+                    $evidence = Wait-TaskCompletionEvidence $id $turn $transcript
+                    if (-not $evidence.Found) {
+                        Write-NotifyLog ("completion skipped session={0} turn={1} reason={2}" -f $id, $turn, $evidence.Reason)
+                    }
+                    elseif ($evidence.Status -eq "error") {
+                        Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $id, $turn)
+                    }
+                    else {
+                        $completionMessage = if ([string]::IsNullOrWhiteSpace([string]$evidence.Message)) { $message } else { [string]$evidence.Message }
+                        if (Test-MessageNeedsInput $completionMessage) {
+                            Invoke-Waiting $id $turn "assistant-question" -AsynchronousSound
+                        }
+                        else { Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $id, $turn) }
+                    }
+                }
             }
         }
         "permission" {

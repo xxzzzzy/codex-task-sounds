@@ -44,11 +44,12 @@ try {
     $settingsPath = Join-Path $TestHome "codex-task-sounds\config.json"
 
     . $installedScript help | Out-Null
-    Assert-True ($Version -eq "1.0.2") "runtime reports version 1.0.2"
+    Assert-True ($Version -eq "1.0.3") "runtime reports version 1.0.3"
     $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
-    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.0.2") "the documented --version command succeeds"
+    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.0.3") "the documented --version command succeeds"
     Assert-True (-not [bool](Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $true)) "fallback waiting_repeat is disabled"
     Assert-True (-not [bool](Get-Setting (Get-DefaultConfiguration) "error_on_tool_failure" $true)) "fallback tool-step failure sounds are disabled"
+    Assert-True ([bool](Get-Setting (Get-DefaultConfiguration) "verify_task_completion" $false)) "fallback Stop Hook verification is enabled"
     Assert-True ([Math]::Abs((Get-WaitingVolume) - 0.65) -lt 0.0001) "action-required events use the documented independent volume"
     $defaultSuccessPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\success.wav")
     $defaultActionPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\action.wav")
@@ -197,7 +198,11 @@ try {
 
     $hookSessionId = 'session with spaces & quote"'
     $hookTurnId = 'turn with spaces & quote"'
-    $hookPayload = [pscustomobject]@{ session_id = $hookSessionId; turn_id = $hookTurnId; last_assistant_message = "done" } | ConvertTo-Json -Compress
+    $hookTranscript = Join-Path $sessionsDirectory ("rollout-hook-" + $hookSessionId.Replace('"', '') + ".jsonl")
+    $hookMetadata = [pscustomobject]@{ type = "session_meta"; payload = [pscustomobject]@{ type = "session_meta"; id = $hookSessionId; source = "vscode" } } | ConvertTo-Json -Depth 10 -Compress
+    $hookComplete = [pscustomobject]@{ type = "event_msg"; payload = [pscustomobject]@{ type = "task_complete"; turn_id = $hookTurnId; last_agent_message = "done" } } | ConvertTo-Json -Depth 10 -Compress
+    [System.IO.File]::WriteAllText($hookTranscript, ($hookMetadata + [Environment]::NewLine + $hookComplete + [Environment]::NewLine), $Utf8NoBom)
+    $hookPayload = [pscustomobject]@{ session_id = $hookSessionId; turn_id = $hookTurnId; transcript_path = $hookTranscript; last_assistant_message = "done" } | ConvertTo-Json -Compress
     $processInfo = New-Object System.Diagnostics.ProcessStartInfo
     $processInfo.FileName = $PowerShellExe
     $processInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $installedScript + '" stop'
@@ -216,6 +221,45 @@ try {
     $expectedHookKey = "success|{0}|{1}" -f $hookSessionId, $hookTurnId
     $expectedStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash $expectedHookKey) + ".stamp")
     Assert-True (Wait-Until { Test-Path -LiteralPath $expectedStamp }) "quoted Hook identifiers survive child-process argument passing"
+
+    $intermediateSessionId = "intermediate-stop-session"
+    $intermediateTurnId = "intermediate-stop-turn"
+    $intermediateTranscript = Join-Path $sessionsDirectory ("rollout-" + $intermediateSessionId + ".jsonl")
+    [System.IO.File]::WriteAllText($intermediateTranscript, ($hookMetadata + [Environment]::NewLine), $Utf8NoBom)
+    $intermediatePayload = [pscustomobject]@{ session_id = $intermediateSessionId; turn_id = $intermediateTurnId; transcript_path = $intermediateTranscript; last_assistant_message = "still working" } | ConvertTo-Json -Compress
+    $intermediateInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $intermediateInfo.FileName = $PowerShellExe
+    $intermediateInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $installedScript + '" stop'
+    $intermediateInfo.UseShellExecute = $false
+    $intermediateInfo.CreateNoWindow = $true
+    $intermediateInfo.RedirectStandardInput = $true
+    $intermediateProcess = New-Object System.Diagnostics.Process
+    $intermediateProcess.StartInfo = $intermediateInfo
+    [void]$intermediateProcess.Start()
+    $intermediateProcess.StandardInput.Write($intermediatePayload)
+    $intermediateProcess.StandardInput.Close()
+    Assert-True ($intermediateProcess.WaitForExit(5000) -and $intermediateProcess.ExitCode -eq 0) "an intermediate Stop Hook returns safely"
+    $intermediateKey = "success|{0}|{1}" -f $intermediateSessionId, $intermediateTurnId
+    $intermediateStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash $intermediateKey) + ".stamp")
+    Start-Sleep -Milliseconds 300
+    Assert-True (-not (Test-Path -LiteralPath $intermediateStamp)) "an intermediate Stop without a terminal event stays quiet"
+
+    $subagentId = "subagent-runtime-session"
+    $subagentTurn = "subagent-runtime-turn"
+    $subagentTranscript = Join-Path $sessionsDirectory ("rollout-" + $subagentId + ".jsonl")
+    $subagentMetadata = [pscustomobject]@{ type = "session_meta"; payload = [pscustomobject]@{ type = "session_meta"; id = $subagentId; source = [pscustomobject]@{ subagent = [pscustomobject]@{ other = "worker" } } } } | ConvertTo-Json -Depth 10 -Compress
+    [System.IO.File]::WriteAllText($subagentTranscript, ($subagentMetadata + [Environment]::NewLine), $Utf8NoBom)
+    $script:SubagentFeedbackCalls = 0
+    Set-Item Function:\Invoke-HiddenStatusSound -Value {
+        param([string]$ChildStatus, [string]$ChildDedupeKey)
+        $null = $ChildStatus
+        $null = $ChildDedupeKey
+        $script:SubagentFeedbackCalls++
+    }
+    $subagentComplete = [pscustomobject]@{ type = "event_msg"; payload = [pscustomobject]@{ type = "task_complete"; turn_id = $subagentTurn; last_agent_message = "done" } } | ConvertTo-Json -Depth 10 -Compress
+    Invoke-RolloutLine $subagentComplete $subagentId
+    Assert-True ($script:SubagentFeedbackCalls -eq 0) "subagent completion does not play a global success sound"
+    Set-Item Function:\Invoke-HiddenStatusSound -Value $originalHiddenStatusSound
 
     $runtimeHooks = [System.IO.File]::ReadAllText((Join-Path $TestHome "hooks.json"), $Utf8NoBom) | ConvertFrom-Json
     $permissionCommand = [string]@($runtimeHooks.hooks.PermissionRequest | ForEach-Object { $_.hooks })[0].command
