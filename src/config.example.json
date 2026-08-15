@@ -6,7 +6,7 @@
   "waiting": true,
   "detect_question_waiting": true,
   "verify_task_completion": true,
-  "completion_grace_ms": 750,
+  "completion_grace_ms": 1500,
   "quiet_hours": {
     "enabled": false,
     "start": "23:00",

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-08-15
+
+- Extend the Hook-only completion grace period to cover terminal events written shortly after the `Stop` Hook, preventing missed completion sounds without restoring a resident watcher.
+- Add a delayed terminal-write regression test while retaining intermediate Stop suppression.
+
 ## 1.1.0 - 2026-08-15
 
 - Switch to Hook-only operation with no login startup, global watcher, per-session monitor, or repeating waiting loop.

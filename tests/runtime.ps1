@@ -43,12 +43,13 @@ try {
     [System.IO.Directory]::CreateDirectory($sessionsDirectory) | Out-Null
 
     . $installedScript help | Out-Null
-    Assert-True ($Version -eq "1.1.0") "runtime reports version 1.1.0"
+    Assert-True ($Version -eq "1.1.1") "runtime reports version 1.1.1"
     $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
-    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.0") "the documented --version command succeeds"
+    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.1") "the documented --version command succeeds"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $null)) "hook-only defaults omit repeating waiting loops"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "error_on_tool_failure" $null)) "hook-only defaults omit watcher-only tool failure handling"
     Assert-True ([bool](Get-Setting (Get-DefaultConfiguration) "verify_task_completion" $false)) "fallback Stop Hook verification is enabled"
+    Assert-True ([int](Get-Setting (Get-DefaultConfiguration) "completion_grace_ms" 0) -eq 1500) "hook-only completion grace covers delayed terminal writes"
     Assert-True ([Math]::Abs((Get-WaitingVolume) - 0.65) -lt 0.0001) "action-required events use the documented independent volume"
     $defaultSuccessPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\success.wav")
     $defaultActionPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\action.wav")
@@ -152,6 +153,30 @@ try {
     Assert-True ($failedProcess.WaitForExit(5000) -and $failedProcess.ExitCode -eq 0) "a final failure Stop Hook returns safely"
     $failedStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash ("error|{0}|{1}" -f $failedSessionId, $failedTurnId)) + ".stamp")
     Assert-True (Wait-Until { Test-Path -LiteralPath $failedStamp }) "a verified final failure triggers the failure sound path"
+
+    $delayedSessionId = "delayed-terminal-session"
+    $delayedTurnId = "delayed-terminal-turn"
+    $delayedTranscript = Join-Path $sessionsDirectory ("rollout-" + $delayedSessionId + ".jsonl")
+    $delayedMetadata = [pscustomobject]@{ type = "session_meta"; payload = [pscustomobject]@{ type = "session_meta"; id = $delayedSessionId; source = "vscode" } } | ConvertTo-Json -Depth 10 -Compress
+    [System.IO.File]::WriteAllText($delayedTranscript, ($delayedMetadata + [Environment]::NewLine), $Utf8NoBom)
+    $delayedPayload = [pscustomobject]@{ session_id = $delayedSessionId; turn_id = $delayedTurnId; transcript_path = $delayedTranscript; last_assistant_message = "done" } | ConvertTo-Json -Compress
+    $delayedInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $delayedInfo.FileName = $PowerShellExe
+    $delayedInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $installedScript + '" stop'
+    $delayedInfo.UseShellExecute = $false
+    $delayedInfo.CreateNoWindow = $true
+    $delayedInfo.RedirectStandardInput = $true
+    $delayedProcess = New-Object System.Diagnostics.Process
+    $delayedProcess.StartInfo = $delayedInfo
+    [void]$delayedProcess.Start()
+    $delayedProcess.StandardInput.Write($delayedPayload)
+    $delayedProcess.StandardInput.Close()
+    Start-Sleep -Milliseconds 1100
+    $delayedComplete = [pscustomobject]@{ type = "event_msg"; payload = [pscustomobject]@{ type = "task_complete"; turn_id = $delayedTurnId; last_agent_message = "done" } } | ConvertTo-Json -Depth 10 -Compress
+    [System.IO.File]::AppendAllText($delayedTranscript, ($delayedComplete + [Environment]::NewLine), $Utf8NoBom)
+    Assert-True ($delayedProcess.WaitForExit(5000) -and $delayedProcess.ExitCode -eq 0) "a delayed terminal event is accepted before the Hook timeout"
+    $delayedStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash ("success|{0}|{1}" -f $delayedSessionId, $delayedTurnId)) + ".stamp")
+    Assert-True (Wait-Until { Test-Path -LiteralPath $delayedStamp }) "a terminal event written after the old grace period still triggers success"
 
     $intermediateSessionId = "intermediate-stop-session"
     $intermediateTurnId = "intermediate-stop-turn"

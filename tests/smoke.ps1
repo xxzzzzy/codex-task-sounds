@@ -105,6 +105,7 @@ try {
     Assert-True ([Math]::Abs([double]$exampleSettings.waiting_volume - 0.65) -lt 0.0001) "the example configuration includes the audible action-required volume"
     Assert-True ($null -eq $exampleSettings.PSObject.Properties["waiting_repeat"]) "the example configuration has no background waiting loop"
     Assert-True ($null -eq $exampleSettings.PSObject.Properties["error_on_tool_failure"]) "the example configuration has no watcher-only tool failure setting"
+    Assert-True ([int]$exampleSettings.completion_grace_ms -eq 1500) "the example configuration covers delayed terminal writes in Hook-only mode"
 
     $installedScript = Join-Path $TestHome "codex-task-sounds\notify.ps1"
     $tokens = $null
