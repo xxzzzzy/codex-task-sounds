@@ -4,11 +4,7 @@
   "success": true,
   "error": true,
   "waiting": true,
-  "waiting_interval": 10,
-  "waiting_repeat": false,
-  "waiting_max_seconds": 120,
   "detect_question_waiting": true,
-  "error_on_tool_failure": false,
   "verify_task_completion": true,
   "completion_grace_ms": 750,
   "quiet_hours": {

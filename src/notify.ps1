@@ -2,13 +2,8 @@
 param(
     [Parameter(Position = 0)]
     [string]$Mode = "help",
-    [string]$SessionId,
-    [string]$TurnId,
-    [string]$TranscriptPath,
     [string]$Status,
     [string]$DedupeKey,
-    [string]$ReadyToken,
-    [int]$ParentProcessId = 0,
     [Alias("version")]
     [switch]$ShowVersion,
     [switch]$Silent,
@@ -27,7 +22,7 @@ $SessionsDirectory = Join-Path $CodexHome "sessions"
 $LogPath = Join-Path $InstallRoot "notify.log"
 $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$Version = "1.0.3"
+$Version = "1.1.0"
 $MaxLogBytes = 2MB
 $MaxLogArchives = 3
 $SettingsWarningLogged = $false
@@ -94,11 +89,7 @@ function Get-DefaultConfiguration {
         success = $true
         error = $true
         waiting = $true
-        waiting_interval = 10
-        waiting_repeat = $false
-        waiting_max_seconds = 120
         detect_question_waiting = $true
-        error_on_tool_failure = $false
         verify_task_completion = $true
         completion_grace_ms = 750
         silent = $false
@@ -507,7 +498,6 @@ function Get-StateFile {
 }
 
 function Get-WaitingFile { param([string]$Id) return Get-StateFile "waiting" $Id }
-function Get-MonitorStopFile { param([string]$Id) return Get-StateFile "monitor-stop" $Id "flag" }
 
 function ConvertTo-ProcessArgument {
     param([string]$Value)
@@ -535,16 +525,6 @@ function ConvertTo-ProcessArgument {
     if ($backslashes -gt 0) { [void]$builder.Append(((([string][char]92) * ($backslashes * 2)) -join '')) }
     [void]$builder.Append('"')
     return $builder.ToString()
-}
-
-function Invoke-HiddenNotifyProcess {
-    param([string]$ChildMode, [string]$ChildSessionId, [string]$ChildTurnId, [string]$ChildTranscriptPath, [int]$ChildParentProcessId = 0)
-    $parts = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", (ConvertTo-ProcessArgument $ScriptPath), $ChildMode)
-    if (-not [string]::IsNullOrWhiteSpace($ChildSessionId)) { $parts += @("-SessionId", (ConvertTo-ProcessArgument $ChildSessionId)) }
-    if (-not [string]::IsNullOrWhiteSpace($ChildTurnId)) { $parts += @("-TurnId", (ConvertTo-ProcessArgument $ChildTurnId)) }
-    if (-not [string]::IsNullOrWhiteSpace($ChildTranscriptPath)) { $parts += @("-TranscriptPath", (ConvertTo-ProcessArgument $ChildTranscriptPath)) }
-    if ($ChildParentProcessId -gt 0) { $parts += @("-ParentProcessId", [string]$ChildParentProcessId) }
-    Start-Process -FilePath $PowerShellPath -ArgumentList ($parts -join " ") -WindowStyle Hidden | Out-Null
 }
 
 function Invoke-HiddenStatusSound {
@@ -620,36 +600,6 @@ function Invoke-Waiting {
     $soundKey = "action|{0}|{1}|start" -f $Id, $ActiveTurnId
     if ($AsynchronousSound) { Invoke-HiddenStatusSound "action" $soundKey }
     else { Invoke-StatusSound "action" $soundKey }
-    if (Get-BooleanSetting $settings "waiting_repeat" $false) {
-        Invoke-HiddenNotifyProcess "wait-loop" $Id $ActiveTurnId $null 0
-    }
-}
-
-function Invoke-WaitLoop {
-    param([string]$Id, [string]$ActiveTurnId)
-    Initialize-Directory
-    $mutexName = "Local\CodexNotifyWait-" + $InstanceKey + "-" + (Get-TextHash ($Id + "|" + $ActiveTurnId)).Substring(0, 16)
-    $created = $false
-    $mutex = New-Object System.Threading.Mutex($true, $mutexName, [ref]$created)
-    if (-not $created) { $mutex.Dispose(); return }
-    try {
-        $settings = Read-Configuration
-        $interval = Get-IntegerSetting $settings "waiting_interval" 10 8 60
-        $maxSeconds = Get-IntegerSetting $settings "waiting_max_seconds" 120 $interval 3600
-        $started = Get-Date
-        $tick = 0
-        while ((Test-WaitingForTurn $Id $ActiveTurnId) -and ((Get-Date) - $started).TotalSeconds -lt $maxSeconds) {
-            Start-Sleep -Seconds $interval
-            if (-not (Test-WaitingForTurn $Id $ActiveTurnId)) { break }
-            $tick++
-            Invoke-StatusSound "action" ("action|{0}|{1}|tick-{2}" -f $Id, $ActiveTurnId, $tick)
-        }
-    }
-    finally {
-        Clear-Waiting $Id $ActiveTurnId
-        $mutex.ReleaseMutex()
-        $mutex.Dispose()
-    }
 }
 
 function Test-MessageNeedsInput {
@@ -658,24 +608,6 @@ function Test-MessageNeedsInput {
     if (-not (Get-BooleanSetting (Read-Configuration) "detect_question_waiting" $true)) { return $false }
     $pattern = '(?is)((?:请(?:确认|选择|回复|告诉我|提供|决定)|需要你(?:确认|选择|回复|提供|决定)|你(?:希望|想要|倾向于)|是否(?:需要|要|可以)|要不要|哪(?:个|一种)|可以吗|方便吗|please\s+(?:confirm|choose|select|reply|provide|decide)|do\s+you\s+(?:want|prefer)|would\s+you\s+like|can\s+you|could\s+you)\s*[。.!！?？]*\s*$|[?？]\s*$)'
     return $Message -match $pattern
-}
-
-function Resolve-Transcript {
-    param([string]$Id, [string]$Candidate)
-    if (-not [string]::IsNullOrWhiteSpace($Candidate) -and (Test-Path -LiteralPath $Candidate)) {
-        return (Get-Item -LiteralPath $Candidate).FullName
-    }
-    $deadline = (Get-Date).AddSeconds(15)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-Path -LiteralPath $SessionsDirectory) {
-            $transcriptMatches = @([System.IO.Directory]::EnumerateFiles($SessionsDirectory, ("*" + $Id + "*.jsonl"), [System.IO.SearchOption]::AllDirectories))
-            if ($transcriptMatches.Count -gt 0) {
-                return @($transcriptMatches | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object LastWriteTime -Descending)[0].FullName
-            }
-        }
-        Start-Sleep -Seconds 1
-    }
-    return $null
 }
 
 function Test-PathInsideDirectory {
@@ -842,405 +774,6 @@ function Wait-TaskCompletionEvidence {
     } while ($true)
 }
 
-function Test-SessionFeedbackAllowed {
-    param([string]$Id)
-    $path = Resolve-CompletionTranscript $Id $null
-    if ([string]::IsNullOrWhiteSpace($path)) { return $true }
-    return Test-NotifiableTranscript $path
-}
-
-function Get-ToolDiagnosticText {
-    param([object]$Payload)
-    $fragments = New-Object System.Collections.Generic.List[string]
-    $nodes = @($Payload, (Get-Setting $Payload "result" $null))
-    foreach ($node in $nodes) {
-        if ($null -eq $node) { continue }
-        foreach ($name in @("message", "error", "stderr", "stdout", "text", "content", "output")) {
-            $value = Get-Setting $node $name $null
-            if ($value -is [string]) {
-                if (-not [string]::IsNullOrWhiteSpace($value)) { $fragments.Add($value) }
-                continue
-            }
-            if ($value -is [System.Collections.IEnumerable]) {
-                foreach ($item in $value) {
-                    if ($item -is [string]) {
-                        if (-not [string]::IsNullOrWhiteSpace($item)) { $fragments.Add($item) }
-                        continue
-                    }
-                    foreach ($childName in @("text", "content", "message", "error", "stderr", "stdout")) {
-                        $child = Get-Setting $item $childName $null
-                        if ($child -is [string] -and -not [string]::IsNullOrWhiteSpace($child)) { $fragments.Add($child) }
-                    }
-                }
-            }
-            elseif ($null -ne $value) {
-                foreach ($childName in @("text", "content", "message", "error", "stderr", "stdout")) {
-                    $child = Get-Setting $value $childName $null
-                    if ($child -is [string] -and -not [string]::IsNullOrWhiteSpace($child)) { $fragments.Add($child) }
-                }
-            }
-        }
-    }
-    return $fragments -join [Environment]::NewLine
-}
-
-function Test-ToolOutputFailed {
-    param([object]$Payload)
-    if (-not (Get-BooleanSetting (Read-Configuration) "error_on_tool_failure" $false)) { return $false }
-    foreach ($node in @($Payload, (Get-Setting $Payload "result" $null))) {
-        if ($null -eq $node) { continue }
-        if ((Get-BooleanSetting $node "isError" $false) -or (Get-BooleanSetting $node "is_error" $false)) { return $true }
-        $status = [string](Get-Setting $node "status" "")
-        if ($status -match '(?i)^(failed|error|errored|cancelled|canceled|aborted)$') { return $true }
-        foreach ($name in @("exit_code", "exitCode")) {
-            $value = Get-Setting $node $name $null
-            if ($null -ne $value) {
-                $exitCode = 0
-                if ([int]::TryParse([string]$value, [ref]$exitCode) -and $exitCode -ne 0) { return $true }
-            }
-        }
-    }
-    $text = Get-ToolDiagnosticText $Payload
-    if ($text -match '(?im)^\s*(?:Script|Command) failed\b') { return $true }
-    foreach ($match in [regex]::Matches($text, '(?im)^\s*Exit code:\s*(-?\d+)\s*$')) {
-        if ([int]$match.Groups[1].Value -ne 0) { return $true }
-    }
-    foreach ($match in [regex]::Matches($text, '(?im)^\s*process exited with (?:status|code)\s*(-?\d+)\s*$')) {
-        if ([int]$match.Groups[1].Value -ne 0) { return $true }
-    }
-    return $false
-}
-
-function Invoke-RolloutLine {
-    param([string]$Line, [string]$Id)
-    if ([string]::IsNullOrWhiteSpace($Line)) { return }
-    try { $item = $Line | ConvertFrom-Json }
-    catch { return }
-    $claimKey = "rollout|{0}|{1}" -f $Id, (Get-TextHash $Line)
-    if ([string]$item.method -eq "turn/completed") {
-        if (-not (Test-AndMarkEvent $claimKey 300)) { return }
-        $turn = Get-Setting $item.params "turn" $null
-        $completedTurnId = [string](Get-Setting $turn "id" "unknown")
-        $status = [string](Get-Setting $turn "status" "completed")
-        Clear-Waiting $Id
-        if ($status -match '(?i)failed|interrupted|cancelled|canceled|aborted') {
-            if (Test-SessionFeedbackAllowed $Id) {
-                Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $Id, $completedTurnId)
-            }
-            else { Write-NotifyLog ("feedback skipped session={0} reason=non-top-level-session" -f $Id) }
-        }
-        return
-    }
-    $topType = [string](Get-Setting $item "type" "")
-    $payload = Get-Setting $item "payload" $null
-    $payloadType = [string](Get-Setting $payload "type" "")
-    $activeTurnId = [string](Get-Setting $payload "turn_id" "unknown")
-    if ($topType -eq "event_msg") {
-        if ($payloadType -match '^(error|stream_error|turn_aborted|task_failed|turn_failed)$') {
-            if (-not (Test-AndMarkEvent $claimKey 300)) { return }
-            Clear-Waiting $Id
-            if (Test-SessionFeedbackAllowed $Id) {
-                Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $Id, $activeTurnId)
-            }
-            else { Write-NotifyLog ("feedback skipped session={0} reason=non-top-level-session" -f $Id) }
-            return
-        }
-        if ($payloadType -match '^(exec_approval_request|apply_patch_approval_request|request_user_input|elicitation_request|mcp_elicitation_request)$') {
-            if (-not (Test-AndMarkEvent $claimKey 300)) { return }
-            Invoke-Waiting $Id $activeTurnId $payloadType -AsynchronousSound
-            return
-        }
-        if ($payloadType -eq 'task_complete') {
-            if (-not (Test-AndMarkEvent $claimKey 300)) { return }
-            $completedTurnId = [string](Get-Setting $payload "turn_id" "unknown")
-            $message = [string](Get-Setting $payload "last_agent_message" "")
-            Clear-Waiting $Id
-            if (Test-MessageNeedsInput $message) {
-                Invoke-Waiting $Id $completedTurnId "assistant-question" -AsynchronousSound
-            }
-            elseif (-not (Test-SessionFeedbackAllowed $Id)) {
-                Write-NotifyLog ("feedback skipped session={0} reason=non-top-level-session" -f $Id)
-            }
-            else {
-                Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $Id, $completedTurnId)
-            }
-            return
-        }
-        if ($payloadType -eq 'turn_complete') {
-            if (Test-AndMarkEvent $claimKey 300) { Clear-Waiting $Id }
-            return
-        }
-        if ($payloadType -match '^(user_message|task_started)$') {
-            if (Test-AndMarkEvent $claimKey 300) { Clear-Waiting $Id }
-            return
-        }
-        if ($payloadType -match 'tool_call_end$' -and (Test-ToolOutputFailed $payload)) {
-            if (-not (Test-AndMarkEvent $claimKey 300)) { return }
-            Invoke-HiddenStatusSound "error" ("tool-error|{0}|{1}|{2}" -f $Id, $activeTurnId, $payloadType)
-            return
-        }
-    }
-    if ($topType -eq "response_item") {
-        if ($payloadType -eq "custom_tool_call") {
-            $name = [string](Get-Setting $payload "name" "")
-            if ($name -match '^(request_user_input|request_permissions)$' -and (Test-AndMarkEvent $claimKey 300)) {
-                Invoke-Waiting $Id $activeTurnId $name -AsynchronousSound
-            }
-            return
-        }
-        if ($payloadType -eq "custom_tool_call_output") {
-            if (-not (Test-AndMarkEvent $claimKey 300)) { return }
-            Clear-Waiting $Id
-            if (Test-ToolOutputFailed $payload) {
-                Invoke-HiddenStatusSound "error" ("tool-error|{0}|{1}" -f $Id, [string](Get-Setting $payload "call_id" "unknown"))
-            }
-        }
-    }
-}
-
-function Split-CompleteUtf8Line {
-    param([byte[]]$PreviousBytes, [byte[]]$NewBytes)
-    if ($null -eq $PreviousBytes) { $PreviousBytes = [byte[]]@() }
-    if ($null -eq $NewBytes) { $NewBytes = [byte[]]@() }
-    $combined = New-Object byte[] ($PreviousBytes.Length + $NewBytes.Length)
-    if ($PreviousBytes.Length -gt 0) { [System.Buffer]::BlockCopy($PreviousBytes, 0, $combined, 0, $PreviousBytes.Length) }
-    if ($NewBytes.Length -gt 0) { [System.Buffer]::BlockCopy($NewBytes, 0, $combined, $PreviousBytes.Length, $NewBytes.Length) }
-    $lastNewline = -1
-    for ($index = $combined.Length - 1; $index -ge 0; $index--) {
-        if ($combined[$index] -eq 10) { $lastNewline = $index; break }
-    }
-    if ($lastNewline -lt 0) {
-        return [pscustomobject]@{ Lines = @(); PendingBytes = $combined }
-    }
-    $completeCount = $lastNewline + 1
-    $text = $Utf8NoBom.GetString($combined, 0, $completeCount)
-    $rawLines = @($text -split "`n")
-    $lines = @()
-    if ($rawLines.Count -gt 1) {
-        foreach ($line in $rawLines[0..($rawLines.Count - 2)]) { $lines += $line.TrimEnd([char]13) }
-    }
-    $remainingCount = $combined.Length - $completeCount
-    $remaining = New-Object byte[] $remainingCount
-    if ($remainingCount -gt 0) { [System.Buffer]::BlockCopy($combined, $completeCount, $remaining, 0, $remainingCount) }
-    return [pscustomobject]@{ Lines = $lines; PendingBytes = $remaining }
-}
-
-function Read-StreamRemainder {
-    param([System.IO.Stream]$Stream)
-    $memory = New-Object System.IO.MemoryStream
-    try {
-        $Stream.CopyTo($memory)
-        return $memory.ToArray()
-    }
-    finally { $memory.Dispose() }
-}
-
-function Invoke-Monitor {
-    param([string]$Id, [string]$CandidateTranscript, [int]$ParentId = 0)
-    Initialize-Directory
-    $globalWatcherCreated = $false
-    $globalWatcherProbe = New-Object System.Threading.Mutex($false, ("Local\CodexNotifyGlobalWatcher-{0}" -f $InstanceKey), [ref]$globalWatcherCreated)
-    $globalWatcherProbe.Dispose()
-    if (-not $globalWatcherCreated) {
-        Write-NotifyLog ("monitor skipped session={0} reason=global-watcher-running" -f $Id)
-        return
-    }
-    $mutexName = "Local\CodexNotifyMonitor-" + $InstanceKey + "-" + (Get-TextHash $Id).Substring(0, 16)
-    $created = $false
-    $mutex = New-Object System.Threading.Mutex($true, $mutexName, [ref]$created)
-    if (-not $created) { $mutex.Dispose(); return }
-    try {
-        $path = Resolve-Transcript $Id $CandidateTranscript
-        if ([string]::IsNullOrWhiteSpace($path)) { return }
-        $stopFile = Get-MonitorStopFile $Id
-        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
-        $offset = (Get-Item -LiteralPath $path).Length
-        $pending = [byte[]]@()
-        $started = Get-Date
-        while (-not (Test-Path -LiteralPath $stopFile) -and ((Get-Date) - $started).TotalHours -lt 24) {
-            if ($ParentId -gt 0 -and $null -eq (Get-Process -Id $ParentId -ErrorAction SilentlyContinue)) { break }
-            try {
-                $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                try {
-                    if ($stream.Length -lt $offset) { $offset = $stream.Length; $pending = [byte[]]@() }
-                    if ($stream.Length -gt $offset) {
-                        $stream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-                        $chunk = Read-StreamRemainder $stream
-                        $offset = $stream.Position
-                        $split = Split-CompleteUtf8Line $pending $chunk
-                        $pending = [byte[]]$split.PendingBytes
-                        foreach ($line in @($split.Lines)) {
-                            try { Invoke-RolloutLine $line $Id }
-                            catch { Write-NotifyLog ("monitor line-error session={0} error={1}" -f $Id, $_.Exception.Message) }
-                        }
-                    }
-                }
-                finally { $stream.Dispose() }
-            }
-            catch { Write-NotifyLog ("monitor read-error session={0} error={1}" -f $Id, $_.Exception.Message) }
-            Start-Sleep -Milliseconds 200
-        }
-    }
-    finally {
-        Remove-Item -LiteralPath (Get-MonitorStopFile $Id) -Force -ErrorAction SilentlyContinue
-        Clear-Waiting $Id
-        $mutex.ReleaseMutex()
-        $mutex.Dispose()
-    }
-}
-
-function Get-RolloutSessionId {
-    param([string]$Path)
-    $name = [System.IO.Path]::GetFileNameWithoutExtension($Path)
-    if ($name -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$') {
-        return $Matches[1]
-    }
-    return "file-" + (Get-TextHash $Path).Substring(0, 20)
-}
-
-function Read-AppendedRollout {
-    param(
-        [string]$Path,
-        [hashtable]$Offsets,
-        [hashtable]$Pending,
-        [switch]$InitializeOnly
-    )
-    try {
-        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
-        if ($InitializeOnly) {
-            $Offsets[$Path] = [long]$item.Length
-            $Pending[$Path] = [byte[]]@()
-            return
-        }
-        if (-not $Offsets.ContainsKey($Path)) {
-            $Offsets[$Path] = [long]0
-            $Pending[$Path] = [byte[]]@()
-        }
-        $offset = [long]$Offsets[$Path]
-        if ($item.Length -lt $offset) {
-            $Offsets[$Path] = [long]$item.Length
-            $Pending[$Path] = [byte[]]@()
-            Write-NotifyLog ("watch reset path={0} reason=file-truncated" -f $Path)
-            return
-        }
-        if ($item.Length -le $offset) { return }
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        try {
-            $stream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-            $chunk = Read-StreamRemainder $stream
-            $Offsets[$Path] = [long]$stream.Position
-        }
-        finally { $stream.Dispose() }
-        $split = Split-CompleteUtf8Line ([byte[]]$Pending[$Path]) $chunk
-        $Pending[$Path] = [byte[]]$split.PendingBytes
-        $id = Get-RolloutSessionId $Path
-        foreach ($line in @($split.Lines)) {
-            try { Invoke-RolloutLine $line $id }
-            catch { Write-NotifyLog ("watch line-error session={0} error={1}" -f $id, $_.Exception.Message) }
-        }
-    }
-    catch {
-        Write-NotifyLog ("watch read-error path={0} error={1}" -f $Path, $_.Exception.Message)
-    }
-}
-
-function Invoke-GlobalWatch {
-    param([string]$WatcherReadyToken)
-    Initialize-Directory
-    $created = $false
-    $mutex = New-Object System.Threading.Mutex($true, ("Local\CodexNotifyGlobalWatcher-{0}" -f $InstanceKey), [ref]$created)
-    if (-not $created) {
-        Write-NotifyLog "watch skipped reason=already-running"
-        $mutex.Dispose()
-        return
-    }
-    $watcher = $null
-    $sourcePrefix = "CodexNotifyFile-{0}-{1}" -f $InstanceKey, $PID
-    try {
-        $readyMessage = if ([string]::IsNullOrWhiteSpace($WatcherReadyToken)) { "watch ready" } else { "watch ready token=$WatcherReadyToken" }
-        Write-NotifyLog $readyMessage
-        while (-not (Test-Path -LiteralPath $SessionsDirectory)) {
-            Start-Sleep -Seconds 2
-        }
-        $offsets = @{}
-        $pending = @{}
-        foreach ($path in [System.IO.Directory]::EnumerateFiles($SessionsDirectory, "*.jsonl", [System.IO.SearchOption]::AllDirectories)) {
-            Read-AppendedRollout $path $offsets $pending -InitializeOnly
-        }
-        $watcher = New-Object System.IO.FileSystemWatcher($SessionsDirectory, "*.jsonl")
-        $watcher.IncludeSubdirectories = $true
-        $watcher.NotifyFilter = [System.IO.NotifyFilters]::FileName -bor [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::Size
-        Register-ObjectEvent -InputObject $watcher -EventName Created -SourceIdentifier ($sourcePrefix + "-Created") | Out-Null
-        Register-ObjectEvent -InputObject $watcher -EventName Changed -SourceIdentifier ($sourcePrefix + "-Changed") | Out-Null
-        Register-ObjectEvent -InputObject $watcher -EventName Renamed -SourceIdentifier ($sourcePrefix + "-Renamed") | Out-Null
-        $watcher.EnableRaisingEvents = $true
-        $nextFallbackScan = (Get-Date).AddSeconds(5)
-        Write-NotifyLog ("watch started files={0} mode=filesystem-watcher fallback_seconds=5" -f $offsets.Count)
-        while ($true) {
-            Wait-Event -Timeout 2 | Out-Null
-            $changedPaths = @{}
-            foreach ($eventRecord in @(Get-Event | Where-Object { $_.SourceIdentifier -like ($sourcePrefix + "-*") })) {
-                try {
-                    $path = [string]$eventRecord.SourceEventArgs.FullPath
-                    if (-not [string]::IsNullOrWhiteSpace($path) -and [System.IO.Path]::GetExtension($path) -eq ".jsonl") {
-                        $changedPaths[$path] = $true
-                    }
-                }
-                finally {
-                    Remove-Event -EventIdentifier $eventRecord.EventIdentifier -ErrorAction SilentlyContinue
-                }
-            }
-            foreach ($path in @($changedPaths.Keys)) {
-                Read-AppendedRollout $path $offsets $pending
-            }
-            if ((Get-Date) -ge $nextFallbackScan -and (Test-Path -LiteralPath $SessionsDirectory)) {
-                $activePaths = @{}
-                foreach ($path in [System.IO.Directory]::EnumerateFiles($SessionsDirectory, "*.jsonl", [System.IO.SearchOption]::AllDirectories)) {
-                    $activePaths[$path] = $true
-                    Read-AppendedRollout $path $offsets $pending
-                }
-                foreach ($knownPath in @($offsets.Keys)) {
-                    if (-not $activePaths.ContainsKey($knownPath)) {
-                        $offsets.Remove($knownPath)
-                        $pending.Remove($knownPath)
-                    }
-                }
-                $nextFallbackScan = (Get-Date).AddSeconds(5)
-            }
-        }
-    }
-    finally {
-        if ($null -ne $watcher) {
-            $watcher.EnableRaisingEvents = $false
-            $watcher.Dispose()
-        }
-        Get-EventSubscriber -ErrorAction SilentlyContinue |
-            Where-Object { $_.SourceIdentifier -like ($sourcePrefix + "-*") } |
-            Unregister-Event -Force -ErrorAction SilentlyContinue
-        Get-Event -ErrorAction SilentlyContinue |
-            Where-Object { $_.SourceIdentifier -like ($sourcePrefix + "-*") } |
-            Remove-Event -ErrorAction SilentlyContinue
-        Write-NotifyLog "watch stopped"
-        try { $mutex.ReleaseMutex() }
-        catch { [System.Diagnostics.Debug]::WriteLine($_.Exception.Message) }
-        $mutex.Dispose()
-    }
-}
-
-function Invoke-WatchSupervisor {
-    param([int]$RestartDelaySeconds = 2, [string]$WatcherReadyToken)
-    while ($true) {
-        try {
-            Invoke-GlobalWatch $WatcherReadyToken
-            return
-        }
-        catch {
-            Write-NotifyLog ("watch restart error={0}" -f $_.Exception.ToString())
-            if ($RestartDelaySeconds -gt 0) { Start-Sleep -Seconds $RestartDelaySeconds }
-        }
-    }
-}
-
 function Show-Help {
     @"
 Codex task status sounds
@@ -1251,7 +784,6 @@ Codex task status sounds
   .\notify.ps1 error
   .\notify.ps1 action
   .\notify.ps1 generate
-  .\notify.ps1 watch
   .\notify.ps1 --silent
   .\notify.ps1 --unsilent
   .\notify.ps1 --version
@@ -1326,15 +858,8 @@ try {
             $payload = Read-HookInput
             if ($null -ne $payload) {
                 $id = [string](Get-Setting $payload "session_id" "")
-                $path = [string](Get-Setting $payload "transcript_path" "")
                 if (-not [string]::IsNullOrWhiteSpace($id)) {
-                    Remove-Item -LiteralPath (Get-MonitorStopFile $id) -Force -ErrorAction SilentlyContinue
-                    $parentId = 0
-                    try {
-                        $parentId = [int](Get-CimInstance Win32_Process -Filter ("ProcessId = " + $PID)).ParentProcessId
-                    }
-                    catch { Write-NotifyLog ("parent process lookup failed error={0}" -f $_.Exception.Message) }
-                    Invoke-HiddenNotifyProcess "monitor" $id $null $path $parentId
+                    Clear-Waiting $id
                 }
             }
         }
@@ -1342,13 +867,9 @@ try {
             $payload = Read-HookInput
             if ($null -ne $payload) {
                 $id = [string](Get-Setting $payload "session_id" "global")
-                [System.IO.File]::WriteAllText((Get-MonitorStopFile $id), [DateTime]::UtcNow.ToString("o"), $Utf8NoBom)
                 Clear-Waiting $id
             }
         }
-        "monitor" { Invoke-Monitor $SessionId $TranscriptPath $ParentProcessId }
-        "watch" { Invoke-WatchSupervisor -WatcherReadyToken $ReadyToken }
-        "wait-loop" { Invoke-WaitLoop $SessionId $TurnId }
         "version" { Write-Output $Version }
         "--version" { Write-Output $Version }
         default { Show-Help }

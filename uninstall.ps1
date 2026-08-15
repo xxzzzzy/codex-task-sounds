@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$CodexHome = $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }),
+    # Retained for compatibility with 1.0.x uninstall commands. Legacy
+    # background startup is always removed when it belongs to this project.
     [switch]$SkipStartup,
     [switch]$KeepFiles
 )
@@ -14,7 +16,7 @@ $LegacyRootScript = Join-Path $CodexHome "notify.ps1"
 $HooksPath = Join-Path $CodexHome "hooks.json"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$StartupCommand = '"' + $PowerShellExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" watch'
+$LegacyStartupCommand = '"' + $PowerShellExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" watch'
 $LegacyRootOwned = $false
 if (Test-Path -LiteralPath $LegacyRootScript -PathType Leaf) {
     try {
@@ -180,13 +182,14 @@ function Get-CleanedHooksDocument {
     return [pscustomobject]@{ Document = $document; Changed = $changed }
 }
 
-function Invoke-InstalledWatcherStop {
-    $watchArgument = '-File "' + $InstallScript + '" watch'
+function Invoke-InstalledBackgroundProcessStop {
     $processIds = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.CommandLine -and
             $_.Name -match '^(?i)(powershell|pwsh)\.exe$' -and
-            $_.CommandLine.IndexOf($watchArgument, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            ($_.CommandLine.IndexOf($InstallScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $_.CommandLine.IndexOf($LegacyRootScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+            $_.CommandLine -match '(?i)\b(watch|monitor|wait-loop)\b'
         } |
         Select-Object -ExpandProperty ProcessId)
     foreach ($processId in $processIds) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
@@ -197,7 +200,7 @@ function Invoke-InstalledWatcherStop {
     }
     $remaining = @($processIds | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
     if ($remaining.Count -gt 0) {
-        throw "Could not stop the existing task sound watcher process: $($remaining -join ', ')"
+        throw "Could not stop the existing task sound background process: $($remaining -join ', ')"
     }
 }
 
@@ -211,12 +214,9 @@ $matchingStartupNames = @()
 foreach ($name in $startupNames) {
     $property = if ($null -eq $runKeyValues) { $null } else { $runKeyValues.PSObject.Properties[$name] }
     $value = if ($null -eq $property) { "" } else { [string]$property.Value }
-    if ($value.Equals($StartupCommand, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($value.Equals($LegacyStartupCommand, [StringComparison]::OrdinalIgnoreCase)) {
         $matchingStartupNames += $name
     }
-}
-if ($SkipStartup -and -not $KeepFiles -and $matchingStartupNames.Count -gt 0) {
-    throw "Refusing to delete installed files while a matching login startup entry is kept. Remove -SkipStartup or add -KeepFiles."
 }
 
 $resolvedInstall = $null
@@ -250,13 +250,26 @@ if (-not $KeepFiles -and (Test-Path -LiteralPath $InstallRoot)) {
     }
 }
 
-Invoke-InstalledWatcherStop
+Invoke-InstalledBackgroundProcessStop
 
-if (-not $SkipStartup) {
-    foreach ($name in $matchingStartupNames) {
-        Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
+foreach ($name in $matchingStartupNames) {
+    Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
+}
+
+$legacyTasks = @(Get-ScheduledTask -TaskName "CodexTaskStatusSounds" -ErrorAction SilentlyContinue)
+foreach ($task in $legacyTasks) {
+    $owned = $false
+    foreach ($action in @($task.Actions)) {
+        $text = [string]$action.Execute + " " + [string]$action.Arguments
+        $usesOwnedScript = $text.IndexOf($InstallScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $text.IndexOf($LegacyRootScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ($usesOwnedScript -and $text -match '(?i)\bwatch\b') { $owned = $true; break }
+    }
+    if ($owned) {
+        Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
     }
 }
+$null = $SkipStartup
 
 if ($null -ne $hooksCleanup -and $hooksCleanup.Changed) { Write-HooksDocument $hooksCleanup.Document }
 
@@ -264,6 +277,5 @@ if ($null -ne $resolvedInstall) {
     Remove-Item -LiteralPath $resolvedInstall -Recurse -Force
 }
 
-Write-Output "Removed Codex task sound hooks and stopped the watcher."
-if ($SkipStartup) { Write-Output "Login startup cleanup was skipped." }
+Write-Output "Removed Codex task sound hooks and stopped any legacy background process."
 if ($KeepFiles) { Write-Output "Installed files were kept at: $InstallRoot" }

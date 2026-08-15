@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-08-15
+
+- Switch to Hook-only operation with no login startup, global watcher, per-session monitor, or repeating waiting loop.
+- Migrate existing installations by stopping owned background processes and removing owned `Run` entries and the legacy scheduled watcher.
+- Keep final completion/failure verification and permission sounds through short-lived Hook processes, and document the reduced intermediate-event coverage.
+
 ## 1.0.3 - 2026-08-12
 
 - Disable immediate sounds for recoverable tool-step failures by default while retaining final task failure sounds and the opt-in setting.

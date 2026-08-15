@@ -8,9 +8,9 @@
 ## 功能
 
 - 任务正常结束：成功音。
-- 任务失败、中断或明确的工具失败：失败音。
+- 任务失败或中断，并由结束 Hook 提供最终状态：失败音。
 - 等待授权、输入或选择：需要操作音。
-- 登录 Windows 后自动启动只读监听器，Codex 或电脑重启后仍可使用。
+- 纯 Hook 模式，不安装登录自启或长期后台监听器；Codex 或电脑重启后仍可使用。
 - 默认声音由 PowerShell 本地生成，不捆绑第三方音频。
 - 可用自己的 MP3 覆盖成功音和失败音。
 - 安装和卸载都会保留其他已有 Codex Hooks。
@@ -40,10 +40,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 1. 将运行文件复制到 `%USERPROFILE%\.codex\codex-task-sounds`。
 2. 严格校验后原子备份并合并 `%USERPROFILE%\.codex\hooks.json`，不会覆盖其他 Hook。
 3. 在隔离目录生成并验证默认 WAV，再原子部署运行文件。
-4. 在当前用户的 `HKCU\...\Run` 中注册登录自启，不需要管理员权限。
-5. 立即启动并验证后台监听器；声音生成或监听器启动失败时安装会明确报错。
+4. 停止旧版本遗留的 `watch`、`monitor` 或等待循环进程。
+5. 清理本项目旧的 `HKCU\...\Run` 登录自启和计划任务，不创建新的后台启动项。
 
-Hook 使用隐藏、非交互的编码 PowerShell 命令，安装路径即使含有中文、空格、`&`、`%` 或单引号也不会被命令行误解析。正常运行不会弹出 PowerShell 窗口。
+Hook 使用隐藏、非交互的编码 PowerShell 命令，安装路径即使含有中文、空格、`&`、`%` 或单引号也不会被命令行误解析。每次 Hook 只启动短时处理进程，不会常驻 PowerShell 或 Windows Terminal。
 
 如果使用了自定义 `CODEX_HOME`，安装器会自动读取；也可以显式指定：
 
@@ -91,11 +91,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
   "success": true,
   "error": true,
   "waiting": true,
-  "waiting_interval": 10,
-  "waiting_repeat": false,
-  "waiting_max_seconds": 120,
   "detect_question_waiting": true,
-  "error_on_tool_failure": false,
   "verify_task_completion": true,
   "completion_grace_ms": 750,
   "quiet_hours": {
@@ -109,9 +105,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 
 - `volume`：完成与失败提示音量，范围 0–1。
 - `waiting_volume`：授权、确认等需要操作的提示音量，范围 0–1，默认高于完成音量以避免漏听。
-- `waiting_repeat`：默认关闭，避免等待音循环打扰。
 - `detect_question_waiting`：根据明确的确认、选择或回复请求识别等待状态。
-- `error_on_tool_failure`：默认关闭，避免 Codex 自动恢复中间工具失败时频繁播放失败音；设为 `true` 可立即播报每次明确的工具失败。
 - `verify_task_completion`：默认开启。`Stop` Hook 必须在对应 rollout 中找到同一 turn 的最终完成/失败事件才会播放，避免中间停止信号被误报为任务完成。
 - `completion_grace_ms`：等待最终 rollout 事件写入的宽限时间，默认 `750` 毫秒，可设为 `0` 至 `3000`。
 - `quiet_hours`：可配置夜间静音时段。
@@ -126,18 +120,21 @@ $script = "$env:USERPROFILE\.codex\codex-task-sounds\notify.ps1"
 
 ## 工作原理
 
-安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。Hook 会快速返回，声音由隐藏子进程异步播放，不会因较长的自定义 MP3 阻塞 Codex。`Stop` 只作为完成候选，运行时会只读核对对应 rollout 中同一 turn 的最终状态；没有最终事件的中间 Stop 保持静默，明确标记的 subagent 会话也不会产生全局完成音。由于单个 Hook 不能稳定表达全部失败状态，后台监听器还会通过 Windows 文件事件只读处理 `%CODEX_HOME%\sessions` 中新增的 rollout 记录，并每 5 秒进行一次低频兜底检查。相同 rollout 事件会跨监听器去重，不再高频递归扫描全部会话文件。
+安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。Hook 会快速返回，声音由短时隐藏子进程异步播放，不会因较长的自定义 MP3 阻塞 Codex。`Stop` 只作为完成候选，运行时会只读核对对应 rollout 中同一 turn 的最终状态；没有最终事件的中间 Stop 保持静默，明确标记的 subagent 会话也不会产生全局完成音。
 
-监听器不修改 Codex 会话文件，不联网，也不发送遥测。诊断日志保存在本机安装目录的 `notify.log`，单个日志达到 2 MB 后自动轮转，最多保留三份归档。日志可能包含本地路径和 Codex 的会话/turn 标识；提交 Issue 前请先脱敏。
+纯 Hook 模式不会监听会话目录，也没有登录后常驻进程。因此，未触发 `Stop` 或 `PermissionRequest` Hook 的中间工具事件不会单独发声；最终失败音取决于 `Stop` Hook 及其 transcript 中可核验的终态。项目不修改 Codex 会话文件，不联网，也不发送遥测。诊断日志保存在本机安装目录的 `notify.log`，单个日志达到 2 MB 后自动轮转，最多保留三份归档。日志可能包含本地路径和 Codex 的会话/turn 标识；提交 Issue 前请先脱敏。
 
 ## 诊断
 
-检查监听器：
+确认没有常驻监听器或登录自启（以下命令正常应无输出）：
 
 ```powershell
 Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -match 'codex-task-sounds.+notify\.ps1.+watch' } |
+  Where-Object { $_.CommandLine -match 'codex-task-sounds.+notify\.ps1.+(watch|monitor|wait-loop)' } |
   Select-Object ProcessId, CommandLine
+
+Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
+  -Name CodexTaskSounds -ErrorAction SilentlyContinue
 ```
 
 查看最近日志：
@@ -165,9 +162,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
-卸载器会先完成结构和路径安全校验，再停止监听器、移除登录自启、只删除本项目的 Hook，并删除 `%USERPROFILE%\.codex\codex-task-sounds`。修改 `hooks.json` 前会创建时间戳备份；重复卸载不会改写已经干净的 Hook 文件。若安装目录或其子项是重解析点，卸载器会拒绝递归删除。
+卸载器会先完成结构和路径安全校验，再停止可能残留的旧版后台进程、清理旧登录自启、只删除本项目的 Hook，并删除 `%USERPROFILE%\.codex\codex-task-sounds`。修改 `hooks.json` 前会创建时间戳备份；重复卸载不会改写已经干净的 Hook 文件。若安装目录或其子项是重解析点，卸载器会拒绝递归删除。
 
-如果只想移除 Hook 和自启但保留声音、配置及日志：
+如果只想移除 Hook 但保留声音、配置及日志：
 
 ```powershell
 .\uninstall.ps1 -KeepFiles
@@ -182,7 +179,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 .\tests\runtime.ps1
 ```
 
-GitHub Actions 会在 `windows-latest` 上执行同一测试，覆盖安装、重复安装、原子备份、精确 Hook 所有权、特殊字符路径、隐藏异步 Hook、Toast 代码缺失、安全卸载、UTF-8 增量读取、错误识别、等待状态隔离、日志轮转、失败退出码、监听器互斥与文件事件监听。
+GitHub Actions 会在 `windows-latest` 上执行同一测试，覆盖安装、重复安装、原子备份、精确 Hook 所有权、特殊字符路径、隐藏异步 Hook、Toast 代码缺失、安全卸载、最终状态核验、等待状态隔离、日志轮转、失败退出码，以及不创建登录自启或常驻监听进程。
 
 ## 隐私与安全
 

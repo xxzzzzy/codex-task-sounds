@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$CodexHome = $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }),
+    # Retained for compatibility with 1.0.x installation commands. Hook-only
+    # mode never registers or starts a resident watcher.
     [switch]$SkipStartup,
     [switch]$NoStart
 )
@@ -16,7 +18,7 @@ $LegacyRootScript = Join-Path $CodexHome "notify.ps1"
 $HooksPath = Join-Path $CodexHome "hooks.json"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$StartupCommand = '"' + $PowerShellExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" watch'
+$LegacyStartupCommand = '"' + $PowerShellExe + '" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" watch'
 $LegacyRootOwned = $false
 if (Test-Path -LiteralPath $LegacyRootScript -PathType Leaf) {
     try {
@@ -220,13 +222,14 @@ function Add-ManagedHook {
     $HooksRoot | Add-Member -NotePropertyName $EventName -NotePropertyValue $cleanGroups -Force
 }
 
-function Invoke-InstalledWatcherStop {
-    $watchArgument = '-File "' + $InstallScript + '" watch'
+function Invoke-InstalledBackgroundProcessStop {
     $processIds = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.CommandLine -and
             $_.Name -match '^(?i)(powershell|pwsh)\.exe$' -and
-            $_.CommandLine.IndexOf($watchArgument, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            ($_.CommandLine.IndexOf($InstallScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $_.CommandLine.IndexOf($LegacyRootScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+            $_.CommandLine -match '(?i)\b(watch|monitor|wait-loop)\b'
         } |
         Select-Object -ExpandProperty ProcessId)
     foreach ($processId in $processIds) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
@@ -237,7 +240,7 @@ function Invoke-InstalledWatcherStop {
     }
     $remaining = @($processIds | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
     if ($remaining.Count -gt 0) {
-        throw "Could not stop the existing task sound watcher process: $($remaining -join ', ')"
+        throw "Could not stop the existing task sound background process: $($remaining -join ', ')"
     }
 }
 
@@ -249,29 +252,38 @@ function Get-RunValue {
     return [string]$property.Value
 }
 
-function Test-WatcherReady {
-    param([System.Diagnostics.Process]$Process, [string]$ReadyToken, [int]$TimeoutSeconds = 5)
-    $watchLogPath = Join-Path $InstallRoot "notify.log"
-    $readyText = "pid={0} watch ready token={1}" -f $Process.Id, $ReadyToken
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        $Process.Refresh()
-        if ($Process.HasExited) { return $false }
-        if (Test-Path -LiteralPath $watchLogPath) {
-            try {
-                if ([System.IO.File]::ReadAllText($watchLogPath, $Utf8NoBom).Contains($readyText)) { return $true }
-            }
-            catch { [System.Diagnostics.Debug]::WriteLine($_.Exception.Message) }
+function Remove-OwnedLegacyStartup {
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $startupNames = @($StartupName)
+    if ($StartupName -ne "CodexTaskSounds") { $startupNames += "CodexTaskSounds" }
+    foreach ($name in $startupNames) {
+        $value = Get-RunValue $runKey $name
+        if ($value.Equals($LegacyStartupCommand, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
         }
-        Start-Sleep -Milliseconds 100
     }
-    return $false
+}
+
+function Remove-OwnedLegacyScheduledWatcher {
+    $tasks = @(Get-ScheduledTask -TaskName "CodexTaskStatusSounds" -ErrorAction SilentlyContinue)
+    foreach ($task in $tasks) {
+        $owned = $false
+        foreach ($action in @($task.Actions)) {
+            $text = [string]$action.Execute + " " + [string]$action.Arguments
+            $usesOwnedScript = $text.IndexOf($InstallScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $text.IndexOf($LegacyRootScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            if ($usesOwnedScript -and $text -match '(?i)\bwatch\b') { $owned = $true; break }
+        }
+        if ($owned) {
+            Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
+        }
+    }
 }
 
 [System.IO.Directory]::CreateDirectory($CodexHome) | Out-Null
 $document = Read-HooksDocument
 $hooksRoot = Get-PropertyValue $document "hooks"
-Add-ManagedHook $hooksRoot "SessionStart" "session-start" 5 "Start task sound monitor"
+Add-ManagedHook $hooksRoot "SessionStart" "session-start" 5 "Initialize task sound state"
 Add-ManagedHook $hooksRoot "PermissionRequest" "permission" 5 "Waiting for user action"
 Add-ManagedHook $hooksRoot "Stop" "stop" 5 "Play task status sound"
 Add-ManagedHook $hooksRoot "SessionEnd" "session-end" 3 ""
@@ -360,35 +372,12 @@ finally {
 
 Write-HooksDocument $document
 
-if (-not $NoStart) {
-    Invoke-InstalledWatcherStop
-    $readyToken = [Guid]::NewGuid().ToString("N")
-    $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $InstallScript + '" watch -ReadyToken ' + $readyToken
-    $watcherProcess = Start-Process -FilePath $PowerShellExe -ArgumentList $arguments -WindowStyle Hidden -PassThru
-    if (-not (Test-WatcherReady $watcherProcess $readyToken 5)) {
-        $exitDescription = if ($watcherProcess.HasExited) { "exit code $($watcherProcess.ExitCode)" } else { "no readiness signal" }
-        if (-not $watcherProcess.HasExited) {
-            Stop-Process -Id $watcherProcess.Id -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id $watcherProcess.Id -Timeout 5 -ErrorAction SilentlyContinue
-        }
-        throw "The background watcher failed startup validation: $exitDescription."
-    }
-}
-
-if (-not $SkipStartup) {
-    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (-not (Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
-    if ($StartupName -ne "CodexTaskSounds") {
-        $legacyValue = Get-RunValue $runKey "CodexTaskSounds"
-        if ($legacyValue.Equals($StartupCommand, [StringComparison]::OrdinalIgnoreCase)) {
-            Remove-ItemProperty -Path $runKey -Name "CodexTaskSounds" -ErrorAction SilentlyContinue
-        }
-    }
-    Set-ItemProperty -Path $runKey -Name $StartupName -Value $StartupCommand
-}
+Invoke-InstalledBackgroundProcessStop
+Remove-OwnedLegacyStartup
+Remove-OwnedLegacyScheduledWatcher
+$null = $SkipStartup
+$null = $NoStart
 
 Write-Output "Installed Codex task sounds to: $InstallRoot"
 Write-Output "Existing hooks were preserved; a timestamped backup was created when hooks.json already existed."
-if ($SkipStartup) { Write-Output "Login startup was skipped." }
-elseif ($NoStart) { Write-Output "Login startup was registered; the watcher was not started in this session." }
-else { Write-Output "The watcher is running and will start again when the current user signs in." }
+Write-Output "Hook-only mode is active; no login startup or resident watcher is installed."

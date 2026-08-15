@@ -103,7 +103,8 @@ try {
     $exampleSettings = [System.IO.File]::ReadAllText((Join-Path $ProjectRoot "src\config.example.json"), $Utf8NoBom) | ConvertFrom-Json
     Assert-True ($exampleSettings -is [System.Management.Automation.PSCustomObject]) "the example configuration is valid JSON object"
     Assert-True ([Math]::Abs([double]$exampleSettings.waiting_volume - 0.65) -lt 0.0001) "the example configuration includes the audible action-required volume"
-    Assert-True (-not [bool]$exampleSettings.error_on_tool_failure) "recoverable tool-step failure sounds are disabled by default"
+    Assert-True ($null -eq $exampleSettings.PSObject.Properties["waiting_repeat"]) "the example configuration has no background waiting loop"
+    Assert-True ($null -eq $exampleSettings.PSObject.Properties["error_on_tool_failure"]) "the example configuration has no watcher-only tool failure setting"
 
     $installedScript = Join-Path $TestHome "codex-task-sounds\notify.ps1"
     $tokens = $null
@@ -113,6 +114,25 @@ try {
     $scriptText = [System.IO.File]::ReadAllText($installedScript)
     Assert-True (-not $scriptText.Contains("ToastNotification")) "custom Windows Toast code is absent"
     Assert-True ($scriptText.Contains("action-custom.mp3")) "custom action-required sounds are supported"
+    Assert-True (-not $scriptText.Contains('"watch" {')) "watch mode is not exposed"
+    Assert-True (-not $scriptText.Contains('"monitor" {')) "per-session monitor mode is not exposed"
+    Assert-True (-not $scriptText.Contains('"wait-loop" {')) "repeating waiting loop mode is not exposed"
+    $helpText = & $installedScript help
+    Assert-True (($helpText -join [Environment]::NewLine) -notmatch '(?im)^\s*\.\\notify\.ps1\s+watch\s*$') "help does not advertise a resident watcher"
+
+    $backgroundProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine.IndexOf($installedScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $_.CommandLine -match '(?i)\b(watch|monitor|wait-loop)\b'
+    })
+    Assert-True ($backgroundProcesses.Count -eq 0) "installation creates no resident background process"
+    $runValues = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
+    $ownedStartupValues = @()
+    if ($null -ne $runValues) {
+        $ownedStartupValues = @($runValues.PSObject.Properties | Where-Object {
+            $_.Name -notmatch '^PS' -and [string]$_.Value -like "*$ExpectedInstallScript*"
+        })
+    }
+    Assert-True ($ownedStartupValues.Count -eq 0) "installation creates no login startup entry"
 
     $hooks = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $TestHome "hooks.json") | ConvertFrom-Json
     foreach ($eventName in $EventModes.Keys) {
