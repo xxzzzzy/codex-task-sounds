@@ -22,7 +22,7 @@ $SessionsDirectory = Join-Path $CodexHome "sessions"
 $LogPath = Join-Path $InstallRoot "notify.log"
 $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$Version = "1.1.1"
+$Version = "1.1.2"
 $MaxLogBytes = 2MB
 $MaxLogArchives = 3
 $SettingsWarningLogged = $false
@@ -91,7 +91,7 @@ function Get-DefaultConfiguration {
         waiting = $true
         detect_question_waiting = $true
         verify_task_completion = $true
-        completion_grace_ms = 1500
+        completion_grace_ms = 3000
         silent = $false
         quiet_hours = [pscustomobject][ordered]@{
             enabled = $false
@@ -764,7 +764,7 @@ function Wait-TaskCompletionEvidence {
     if (-not (Get-BooleanSetting $settings "verify_task_completion" $true)) {
         return [pscustomobject]@{ Found = $true; Status = "success"; Message = ""; Path = $CandidateTranscript; Reason = "verification-disabled" }
     }
-    $graceMilliseconds = Get-IntegerSetting $settings "completion_grace_ms" 1500 0 3000
+    $graceMilliseconds = Get-IntegerSetting $settings "completion_grace_ms" 3000 0 3000
     $deadline = (Get-Date).AddMilliseconds($graceMilliseconds)
     do {
         $evidence = Get-TaskCompletionEvidence $Id $Turn $CandidateTranscript

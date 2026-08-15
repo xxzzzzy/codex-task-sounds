@@ -43,13 +43,13 @@ try {
     [System.IO.Directory]::CreateDirectory($sessionsDirectory) | Out-Null
 
     . $installedScript help | Out-Null
-    Assert-True ($Version -eq "1.1.1") "runtime reports version 1.1.1"
+    Assert-True ($Version -eq "1.1.2") "runtime reports version 1.1.2"
     $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
-    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.1") "the documented --version command succeeds"
+    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.2") "the documented --version command succeeds"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $null)) "hook-only defaults omit repeating waiting loops"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "error_on_tool_failure" $null)) "hook-only defaults omit watcher-only tool failure handling"
     Assert-True ([bool](Get-Setting (Get-DefaultConfiguration) "verify_task_completion" $false)) "fallback Stop Hook verification is enabled"
-    Assert-True ([int](Get-Setting (Get-DefaultConfiguration) "completion_grace_ms" 0) -eq 1500) "hook-only completion grace covers delayed terminal writes"
+    Assert-True ([int](Get-Setting (Get-DefaultConfiguration) "completion_grace_ms" 0) -eq 3000) "hook-only completion grace covers measured terminal-write delays"
     Assert-True ([Math]::Abs((Get-WaitingVolume) - 0.65) -lt 0.0001) "action-required events use the documented independent volume"
     $defaultSuccessPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\success.wav")
     $defaultActionPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\action.wav")
@@ -168,15 +168,17 @@ try {
     $delayedInfo.RedirectStandardInput = $true
     $delayedProcess = New-Object System.Diagnostics.Process
     $delayedProcess.StartInfo = $delayedInfo
+    [System.IO.File]::WriteAllText($LogPath, "", $Utf8NoBom)
     [void]$delayedProcess.Start()
     $delayedProcess.StandardInput.Write($delayedPayload)
     $delayedProcess.StandardInput.Close()
-    Start-Sleep -Milliseconds 1100
+    Assert-True (Wait-Until { (Test-Path -LiteralPath $LogPath) -and ((Get-Content -LiteralPath $LogPath -Tail 10) -match 'invoke mode=stop') }) "the delayed-event timing starts after the Stop Hook is running"
+    Start-Sleep -Milliseconds 2200
     $delayedComplete = [pscustomobject]@{ type = "event_msg"; payload = [pscustomobject]@{ type = "task_complete"; turn_id = $delayedTurnId; last_agent_message = "done" } } | ConvertTo-Json -Depth 10 -Compress
     [System.IO.File]::AppendAllText($delayedTranscript, ($delayedComplete + [Environment]::NewLine), $Utf8NoBom)
     Assert-True ($delayedProcess.WaitForExit(5000) -and $delayedProcess.ExitCode -eq 0) "a delayed terminal event is accepted before the Hook timeout"
     $delayedStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash ("success|{0}|{1}" -f $delayedSessionId, $delayedTurnId)) + ".stamp")
-    Assert-True (Wait-Until { Test-Path -LiteralPath $delayedStamp }) "a terminal event written after the old grace period still triggers success"
+    Assert-True (Wait-Until { Test-Path -LiteralPath $delayedStamp }) "a terminal event written after the former 1.5-second grace still triggers success"
 
     $intermediateSessionId = "intermediate-stop-session"
     $intermediateTurnId = "intermediate-stop-turn"

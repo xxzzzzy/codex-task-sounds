@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.1.2 - 2026-08-15
+
+- Increase the Hook-only completion grace period to three seconds after a real Codex Desktop trace showed `task_complete` arriving about 2.3 seconds after `Stop` began.
+- Extend the delayed terminal-write regression test beyond the former 1.5-second window while keeping intermediate Stops quiet and avoiding a resident watcher.
+
 ## 1.1.1 - 2026-08-15
 
 - Extend the Hook-only completion grace period to cover terminal events written shortly after the `Stop` Hook, preventing missed completion sounds without restoring a resident watcher.
