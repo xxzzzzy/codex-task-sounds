@@ -107,7 +107,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 - `waiting_volume`：授权、确认等需要操作的提示音量，范围 0–1，默认高于完成音量以避免漏听。
 - `detect_question_waiting`：根据明确的确认、选择或回复请求识别等待状态。
 - `verify_task_completion`：默认开启。`Stop` Hook 必须在对应 rollout 中找到同一 turn 的最终完成/失败事件才会播放，避免中间停止信号被误报为任务完成。
-- `completion_grace_ms`：等待最终 rollout 事件写入的宽限时间，默认 `3000` 毫秒，可设为 `0` 至 `3000`。本机实测 `task_complete` 可能在 `Stop` 启动约 2.3 秒后才写入，因此纯 Hook 模式使用完整三秒窗口。
+- `completion_grace_ms`：短时核验进程等待最终 rollout 事件写入的宽限时间，默认 `3000` 毫秒，可设为 `0` 至 `3000`。`Stop` Hook 本身不会同步等待，因此不会阻塞 Codex 写入 `task_complete`。
 - `quiet_hours`：可配置夜间静音时段。
 
 临时静音或恢复：
@@ -120,7 +120,7 @@ $script = "$env:USERPROFILE\.codex\codex-task-sounds\notify.ps1"
 
 ## 工作原理
 
-安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。Hook 会快速返回，声音由短时隐藏子进程异步播放，不会因较长的自定义 MP3 阻塞 Codex。`Stop` 只作为完成候选，运行时会只读核对对应 rollout 中同一 turn 的最终状态；没有最终事件的中间 Stop 保持静默，明确标记的 subagent 会话也不会产生全局完成音。
+安装器注册 `SessionStart`、`PermissionRequest`、`Stop` 和 `SessionEnd` Hook。`Stop` 会派发一个仅存活数秒的隐藏核验进程后立即返回，避免同步 Hook 阻塞 Codex 写入最终状态；声音也由短时隐藏子进程异步播放。核验进程只读检查对应 rollout 中同一 turn 的最终状态；没有最终事件的中间 Stop 保持静默，明确标记的 subagent 会话也不会产生全局完成音。
 
 纯 Hook 模式不会监听会话目录，也没有登录后常驻进程。因此，未触发 `Stop` 或 `PermissionRequest` Hook 的中间工具事件不会单独发声；最终失败音取决于 `Stop` Hook 及其 transcript 中可核验的终态。项目不修改 Codex 会话文件，不联网，也不发送遥测。诊断日志保存在本机安装目录的 `notify.log`，单个日志达到 2 MB 后自动轮转，最多保留三份归档。日志可能包含本地路径和 Codex 的会话/turn 标识；提交 Issue 前请先脱敏。
 

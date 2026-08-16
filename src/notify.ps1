@@ -4,6 +4,9 @@ param(
     [string]$Mode = "help",
     [string]$Status,
     [string]$DedupeKey,
+    [string]$VerificationSessionId,
+    [string]$VerificationTurnId,
+    [string]$VerificationTranscriptPath,
     [Alias("version")]
     [switch]$ShowVersion,
     [switch]$Silent,
@@ -22,7 +25,7 @@ $SessionsDirectory = Join-Path $CodexHome "sessions"
 $LogPath = Join-Path $InstallRoot "notify.log"
 $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$Version = "1.1.2"
+$Version = "1.1.3"
 $MaxLogBytes = 2MB
 $MaxLogArchives = 3
 $SettingsWarningLogged = $false
@@ -534,6 +537,22 @@ function Invoke-HiddenStatusSound {
     Start-Process -FilePath $PowerShellPath -ArgumentList ($parts -join " ") -WindowStyle Hidden | Out-Null
 }
 
+function Invoke-HiddenStopVerification {
+    param([string]$Id, [string]$Turn, [string]$Transcript)
+    $parts = @(
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-File", (ConvertTo-ProcessArgument $ScriptPath),
+        "verify-stop",
+        "-VerificationSessionId", (ConvertTo-ProcessArgument $Id),
+        "-VerificationTurnId", (ConvertTo-ProcessArgument $Turn),
+        "-VerificationTranscriptPath", (ConvertTo-ProcessArgument $Transcript)
+    )
+    Start-Process -FilePath $PowerShellPath -ArgumentList ($parts -join " ") -WindowStyle Hidden | Out-Null
+}
+
 function Clear-Waiting {
     param([string]$Id, [string]$ExpectedTurnId)
     if ([string]::IsNullOrWhiteSpace($Id)) { $Id = "global" }
@@ -774,6 +793,23 @@ function Wait-TaskCompletionEvidence {
     } while ($true)
 }
 
+function Invoke-StopVerification {
+    param([string]$Id, [string]$Turn, [string]$Transcript)
+    $evidence = Wait-TaskCompletionEvidence $Id $Turn $Transcript
+    if (-not $evidence.Found) {
+        Write-NotifyLog ("completion skipped session={0} turn={1} reason={2}" -f $Id, $Turn, $evidence.Reason)
+    }
+    elseif ($evidence.Status -eq "error") {
+        Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $Id, $Turn)
+    }
+    elseif (Test-MessageNeedsInput ([string]$evidence.Message)) {
+        Invoke-Waiting $Id $Turn "assistant-question" -AsynchronousSound
+    }
+    else {
+        Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $Id, $Turn)
+    }
+}
+
 function Show-Help {
     @"
 Codex task status sounds
@@ -831,22 +867,13 @@ try {
                     Invoke-Waiting $id $turn "assistant-question" -AsynchronousSound
                 }
                 else {
-                    $evidence = Wait-TaskCompletionEvidence $id $turn $transcript
-                    if (-not $evidence.Found) {
-                        Write-NotifyLog ("completion skipped session={0} turn={1} reason={2}" -f $id, $turn, $evidence.Reason)
-                    }
-                    elseif ($evidence.Status -eq "error") {
-                        Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $id, $turn)
-                    }
-                    else {
-                        $completionMessage = if ([string]::IsNullOrWhiteSpace([string]$evidence.Message)) { $message } else { [string]$evidence.Message }
-                        if (Test-MessageNeedsInput $completionMessage) {
-                            Invoke-Waiting $id $turn "assistant-question" -AsynchronousSound
-                        }
-                        else { Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $id, $turn) }
-                    }
+                    Invoke-HiddenStopVerification $id $turn $transcript
+                    Write-NotifyLog ("completion verification queued session={0} turn={1}" -f $id, $turn)
                 }
             }
+        }
+        "verify-stop" {
+            Invoke-StopVerification $VerificationSessionId $VerificationTurnId $VerificationTranscriptPath
         }
         "permission" {
             $payload = Read-HookInput

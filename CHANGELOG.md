@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.3 - 2026-08-16
+
+- Move final transcript verification into a short-lived hidden child process so the synchronous `Stop` Hook can return before Codex writes `task_complete`.
+- Preserve Hook-only operation, intermediate Stop suppression, custom sounds, and the absence of login or resident background processes.
+- Add regression coverage proving Stop returns before a delayed terminal event while the detached verifier still plays the completion path.
+
 ## 1.1.2 - 2026-08-15
 
 - Increase the Hook-only completion grace period to three seconds after a real Codex Desktop trace showed `task_complete` arriving about 2.3 seconds after `Stop` began.

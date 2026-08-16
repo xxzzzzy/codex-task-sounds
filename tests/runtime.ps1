@@ -43,9 +43,9 @@ try {
     [System.IO.Directory]::CreateDirectory($sessionsDirectory) | Out-Null
 
     . $installedScript help | Out-Null
-    Assert-True ($Version -eq "1.1.2") "runtime reports version 1.1.2"
+    Assert-True ($Version -eq "1.1.3") "runtime reports version 1.1.3"
     $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
-    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.2") "the documented --version command succeeds"
+    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.3") "the documented --version command succeeds"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $null)) "hook-only defaults omit repeating waiting loops"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "error_on_tool_failure" $null)) "hook-only defaults omit watcher-only tool failure handling"
     Assert-True ([bool](Get-Setting (Get-DefaultConfiguration) "verify_task_completion" $false)) "fallback Stop Hook verification is enabled"
@@ -169,14 +169,17 @@ try {
     $delayedProcess = New-Object System.Diagnostics.Process
     $delayedProcess.StartInfo = $delayedInfo
     [System.IO.File]::WriteAllText($LogPath, "", $Utf8NoBom)
+    $delayedStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     [void]$delayedProcess.Start()
     $delayedProcess.StandardInput.Write($delayedPayload)
     $delayedProcess.StandardInput.Close()
-    Assert-True (Wait-Until { (Test-Path -LiteralPath $LogPath) -and ((Get-Content -LiteralPath $LogPath -Tail 10) -match 'invoke mode=stop') }) "the delayed-event timing starts after the Stop Hook is running"
+    Assert-True ($delayedProcess.WaitForExit(2000) -and $delayedProcess.ExitCode -eq 0) "the Stop Hook returns before the terminal event is written"
+    $delayedStopwatch.Stop()
+    Assert-True ($delayedStopwatch.ElapsedMilliseconds -lt 1800) "terminal verification does not block the Stop Hook"
+    Assert-True (Wait-Until { (Test-Path -LiteralPath $LogPath) -and ((Get-Content -LiteralPath $LogPath -Tail 10) -match 'invoke mode=verify-stop') }) "the short-lived verifier starts after Stop dispatch"
     Start-Sleep -Milliseconds 2200
     $delayedComplete = [pscustomobject]@{ type = "event_msg"; payload = [pscustomobject]@{ type = "task_complete"; turn_id = $delayedTurnId; last_agent_message = "done" } } | ConvertTo-Json -Depth 10 -Compress
     [System.IO.File]::AppendAllText($delayedTranscript, ($delayedComplete + [Environment]::NewLine), $Utf8NoBom)
-    Assert-True ($delayedProcess.WaitForExit(5000) -and $delayedProcess.ExitCode -eq 0) "a delayed terminal event is accepted before the Hook timeout"
     $delayedStamp = Join-Path $StateDirectory ("event-" + (Get-TextHash ("success|{0}|{1}" -f $delayedSessionId, $delayedTurnId)) + ".stamp")
     Assert-True (Wait-Until { Test-Path -LiteralPath $delayedStamp }) "a terminal event written after the former 1.5-second grace still triggers success"
 
