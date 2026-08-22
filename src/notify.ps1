@@ -25,7 +25,7 @@ $SessionsDirectory = Join-Path $CodexHome "sessions"
 $LogPath = Join-Path $InstallRoot "notify.log"
 $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$Version = "1.1.3"
+$Version = "1.1.4"
 $MaxLogBytes = 2MB
 $MaxLogArchives = 3
 $SettingsWarningLogged = $false
@@ -92,7 +92,6 @@ function Get-DefaultConfiguration {
         success = $true
         error = $true
         waiting = $true
-        detect_question_waiting = $true
         verify_task_completion = $true
         completion_grace_ms = 3000
         silent = $false
@@ -621,14 +620,6 @@ function Invoke-Waiting {
     else { Invoke-StatusSound "action" $soundKey }
 }
 
-function Test-MessageNeedsInput {
-    param([string]$Message)
-    if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
-    if (-not (Get-BooleanSetting (Read-Configuration) "detect_question_waiting" $true)) { return $false }
-    $pattern = '(?is)((?:请(?:确认|选择|回复|告诉我|提供|决定)|需要你(?:确认|选择|回复|提供|决定)|你(?:希望|想要|倾向于)|是否(?:需要|要|可以)|要不要|哪(?:个|一种)|可以吗|方便吗|please\s+(?:confirm|choose|select|reply|provide|decide)|do\s+you\s+(?:want|prefer)|would\s+you\s+like|can\s+you|could\s+you)\s*[。.!！?？]*\s*$|[?？]\s*$)'
-    return $Message -match $pattern
-}
-
 function Test-PathInsideDirectory {
     param([string]$Path, [string]$Directory)
     if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Directory)) { return $false }
@@ -802,9 +793,6 @@ function Invoke-StopVerification {
     elseif ($evidence.Status -eq "error") {
         Invoke-HiddenStatusSound "error" ("error|{0}|{1}" -f $Id, $Turn)
     }
-    elseif (Test-MessageNeedsInput ([string]$evidence.Message)) {
-        Invoke-Waiting $Id $Turn "assistant-question" -AsynchronousSound
-    }
     else {
         Invoke-HiddenStatusSound "success" ("success|{0}|{1}" -f $Id, $Turn)
     }
@@ -860,16 +848,10 @@ try {
             else {
                 $id = [string](Get-Setting $payload "session_id" "global")
                 $turn = [string](Get-Setting $payload "turn_id" "unknown")
-                $message = [string](Get-Setting $payload "last_assistant_message" "")
                 $transcript = [string](Get-Setting $payload "transcript_path" "")
                 Clear-Waiting $id
-                if (Test-MessageNeedsInput $message) {
-                    Invoke-Waiting $id $turn "assistant-question" -AsynchronousSound
-                }
-                else {
-                    Invoke-HiddenStopVerification $id $turn $transcript
-                    Write-NotifyLog ("completion verification queued session={0} turn={1}" -f $id, $turn)
-                }
+                Invoke-HiddenStopVerification $id $turn $transcript
+                Write-NotifyLog ("completion verification queued session={0} turn={1}" -f $id, $turn)
             }
         }
         "verify-stop" {

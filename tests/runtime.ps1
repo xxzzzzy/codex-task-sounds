@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
@@ -43,9 +43,9 @@ try {
     [System.IO.Directory]::CreateDirectory($sessionsDirectory) | Out-Null
 
     . $installedScript help | Out-Null
-    Assert-True ($Version -eq "1.1.3") "runtime reports version 1.1.3"
+    Assert-True ($Version -eq "1.1.4") "runtime reports version 1.1.3"
     $reportedVersion = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $installedScript --version
-    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.3") "the documented --version command succeeds"
+    Assert-True ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "1.1.4") "the documented --version command succeeds"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "waiting_repeat" $null)) "hook-only defaults omit repeating waiting loops"
     Assert-True ($null -eq (Get-Setting (Get-DefaultConfiguration) "error_on_tool_failure" $null)) "hook-only defaults omit watcher-only tool failure handling"
     Assert-True ([bool](Get-Setting (Get-DefaultConfiguration) "verify_task_completion" $false)) "fallback Stop Hook verification is enabled"
@@ -54,10 +54,6 @@ try {
     $defaultSuccessPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\success.wav")
     $defaultActionPeak = Get-WavePeak (Join-Path $TestHome "codex-task-sounds\sounds\action.wav")
     Assert-True ($defaultActionPeak -gt ($defaultSuccessPeak * 1.8)) "the default action-required sound is substantially more audible than the completion fallback"
-
-    Assert-True (Test-MessageNeedsInput "请确认是否继续？") "Chinese confirmation questions are recognized as waiting for input"
-    Assert-True (Test-MessageNeedsInput "Could you choose one?") "English questions are recognized as waiting for input"
-    Assert-True (-not (Test-MessageNeedsInput "The task is complete.")) "declarative completion text is not treated as waiting for input"
 
     $waitingId = "runtime-session"
     $waitingPath = Get-WaitingFile $waitingId

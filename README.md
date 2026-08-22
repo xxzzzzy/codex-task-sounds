@@ -91,7 +91,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
   "success": true,
   "error": true,
   "waiting": true,
-  "detect_question_waiting": true,
   "verify_task_completion": true,
   "completion_grace_ms": 3000,
   "quiet_hours": {
@@ -105,7 +104,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script action
 
 - `volume`：完成与失败提示音量，范围 0–1。
 - `waiting_volume`：授权、确认等需要操作的提示音量，范围 0–1，默认高于完成音量以避免漏听。
-- `detect_question_waiting`：根据明确的确认、选择或回复请求识别等待状态。
 - `verify_task_completion`：默认开启。`Stop` Hook 必须在对应 rollout 中找到同一 turn 的最终完成/失败事件才会播放，避免中间停止信号被误报为任务完成。
 - `completion_grace_ms`：短时核验进程等待最终 rollout 事件写入的宽限时间，默认 `3000` 毫秒，可设为 `0` 至 `3000`。`Stop` Hook 本身不会同步等待，因此不会阻塞 Codex 写入 `task_complete`。
 - `quiet_hours`：可配置夜间静音时段。

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restrict action-required sounds to real permission requests and play task completion only as success or failure.
+
 ## 1.1.3 - 2026-08-16
 
 - Move final transcript verification into a short-lived hidden child process so the synchronous `Stop` Hook can return before Codex writes `task_complete`.
